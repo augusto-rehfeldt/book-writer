@@ -143,7 +143,7 @@ class StructureStep(BaseStep):
         lines = content.split('\n')
         # Handle both numbered lists and markdown tables.
         numbered_pattern = re.compile(
-            r"""^[*\s#]*\d+\.\s*Chapter\s+(\d+)\s*[—–-]\s*["']*(.+?)["']*[*\s#]*$""",
+            r"""^\s*(?:[*#>\-]\s*)?\d+\.\s*Chapter\s+(\d+)\s*[—–-]\s*(.+?)\s*$""",
             re.IGNORECASE,
         )
         table_pattern = re.compile(
@@ -166,10 +166,9 @@ class StructureStep(BaseStep):
                 
                 if match:
                     chapter_number = int(match.group(1))
-                    title = re.sub(r'\*\*', '', match.group(2)).strip()
-                    summary = ""
-                    key_events = ""
-                    word_count_estimate = 1500
+                    title, summary, key_events, word_count_estimate = self._parse_numbered_outline(
+                        match.group(2)
+                    )
                 elif table_match:
                     chapter_number = int(table_match.group(1))
                     title = self._clean_title_cell(table_match.group(2))
@@ -200,6 +199,38 @@ class StructureStep(BaseStep):
         print(f"Extracted {len(chapters)} chapters")
         return chapters
 
+    def _parse_numbered_outline(self, text: str) -> tuple[str, str, str, int]:
+        """Parse a numbered chapter line that may contain title, summary, and word count."""
+        cleaned = re.sub(r"\*\*", "", text).strip()
+        word_count_estimate = 1500
+        key_events = ""
+
+        word_count_match = re.search(
+            r"(?:word count(?: estimate)?|words?)\s*:\s*([\d,]+(?:\s*-\s*[\d,]+)?)",
+            cleaned,
+            re.IGNORECASE,
+        )
+        if word_count_match:
+            word_count_estimate = self._clean_word_count(word_count_match.group(1))
+            cleaned = cleaned[:word_count_match.start()].rstrip(" ,;:-")
+
+        key_events_match = re.search(r"\bkey events?\s*:\s*(.+)$", cleaned, re.IGNORECASE)
+        if key_events_match:
+            key_events = key_events_match.group(1).strip()
+            cleaned = cleaned[:key_events_match.start()].rstrip(" ,;:-")
+
+        if ":" in cleaned:
+            title, summary = cleaned.split(":", 1)
+        else:
+            title, summary = cleaned, ""
+
+        return (
+            self._clean_title_cell(title),
+            self._clean_cell(summary),
+            self._clean_cell(key_events),
+            word_count_estimate,
+        )
+
     def _is_table_separator(self, line: str) -> bool:
         if not line.startswith("|"):
             return False
@@ -227,6 +258,12 @@ class StructureStep(BaseStep):
         return cleaned.strip()
 
     def _clean_word_count(self, text: str) -> int:
+        range_match = re.search(r"(\d[\d,]*)\s*-\s*(\d[\d,]*)", text)
+        if range_match:
+            low = int(range_match.group(1).replace(",", ""))
+            high = int(range_match.group(2).replace(",", ""))
+            return max(400, (low + high) // 2)
+
         digits = re.sub(r"[^\d]", "", text)
         if not digits:
             return 1500
