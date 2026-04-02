@@ -2,6 +2,10 @@
 AI Book Creator - A modular system for generating complete books using AI
 """
 
+from .env import load_local_env
+
+load_local_env()
+
 from .core.book_creator import AIBookCreator
 from .core.project_manager import ProjectManager
 from .services.ai_service import AIService

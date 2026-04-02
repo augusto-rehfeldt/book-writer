@@ -6,6 +6,10 @@ import json
 import os
 from pathlib import Path
 
+from .env import load_local_env
+
+load_local_env()
+
 from .core.book_creator import AIBookCreator
 
 
