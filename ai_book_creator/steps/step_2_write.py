@@ -84,24 +84,7 @@ class WriteStep(BaseStep):
             if self.glossary_manager:
                 glossary_context = self.glossary_manager.get_context_for_writing()
             
-            prompt = f"""Write complete chapter text:
-
-CHAPTER: {chapter_data['title']}
-PLOT OUTLINE: {chapter_data['plot_outline']}
-
-{glossary_context}
-
-Write at least {min_words} words.
-- Creative, authentic prose
-- Natural dialogue
-- Varied pacing
-- Clean, modern style
-- Show, don't tell
-- CRITICAL: DO NOT start the chapter with an ambient, exhaustive description of the environment, scenery, or weather.
-- Start boldly with character action, immediate dialogue, or a character's engaging inner thought.
-- Keep the narration character-driven and humane rather than detached.
-
-Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently placed at the very top of the text."""
+            prompt = self._build_chapter_prompt(chapter_data, glossary_context, min_words)
             
             text = self.ai_service.generate_content(
                 prompt,
@@ -172,3 +155,28 @@ Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently
         self.save_step_data(written_data)
         self.mark_completed()
         return written_data
+
+    def _build_chapter_prompt(self, chapter_data: Dict[str, Any], glossary_context: str, min_words: int) -> str:
+        opening_style = chapter_data.get("opening_style", "").strip() or "varied"
+        return f"""Write complete chapter text:
+
+CHAPTER: {chapter_data['title']}
+OPENING STYLE TAG: {opening_style}
+PLOT OUTLINE: {chapter_data['plot_outline']}
+
+{glossary_context}
+
+Write at least {min_words} words.
+- Creative, authentic prose
+- Natural dialogue
+- Varied pacing
+- Clean, modern style
+- Show, don't tell
+- CRITICAL: Make the opening feel different from the previous chapter. Do not reuse the same first-sentence structure, first image, or cadence unless the story absolutely requires it.
+- CRITICAL: Do not begin with "Again" unless it is literal dialogue and genuinely belongs to the scene.
+- CRITICAL: Avoid template openings such as "The room...", "The air...", "He looked...", "She looked...", "Across the world...", or similar boilerplate scene-setters.
+- CRITICAL: Start with a concrete action, contradiction, sensory detail, or voice that belongs only to this chapter.
+- CRITICAL: Vary sentence length and paragraph rhythm so the prose feels lived-in, not formulaic.
+- Keep the narration character-driven and humane rather than detached.
+
+Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently placed at the very top of the text."""
