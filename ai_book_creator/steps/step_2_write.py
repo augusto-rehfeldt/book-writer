@@ -171,6 +171,13 @@ Write at least {min_words} words.
 - Natural dialogue
 - Varied pacing
 - Clean, modern style
+- Use markdown intentionally to improve readability and emphasis.
+- Put the chapter title at the top as a markdown heading.
+- Use `##` or `###` for scene or beat subheadings only when they help the flow.
+- Use **bold** and *italics* sparingly for emphasis, interiority, or important details.
+- Use `***` or `---` for scene breaks when the chapter needs a visual pause.
+- If a local image reference genuinely helps the chapter, you may include it with markdown image syntax like `![alt text](relative/path.png)`.
+- Do not over-format every paragraph; keep markdown purposeful and novel-like.
 - Show, don't tell
 - CRITICAL: Make the opening feel different from the previous chapter. Do not reuse the same first-sentence structure, first image, or cadence unless the story absolutely requires it.
 - CRITICAL: Do not begin with "Again" unless it is literal dialogue and genuinely belongs to the scene.

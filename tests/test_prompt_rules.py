@@ -52,6 +52,8 @@ class PromptRuleTests(unittest.TestCase):
             )
 
         self.assertIn("OPENING STYLE TAG: dialogue-led", prompt)
+        self.assertIn("markdown intentionally", prompt.lower())
+        self.assertIn("use `##` or `###`", prompt.lower())
         self.assertIn("Do not begin with \"Again\"", prompt)
         self.assertIn("template openings", prompt)
         self.assertIn("Varied pacing", prompt)

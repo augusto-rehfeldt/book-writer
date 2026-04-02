@@ -25,6 +25,13 @@ class EbookChapter:
     content: str
 
 
+@dataclass(frozen=True)
+class EbookImage:
+    source_path: Path
+    epub_path: str
+    media_type: str
+
+
 def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathLike[str] | None = None) -> str:
     """Build a minimal EPUB from a generated book project."""
     project_path = Path(project_dir)
@@ -32,6 +39,7 @@ def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathL
     chapters = _load_chapters(project_path, project_data)
     if not chapters:
         raise ValueError(f"No chapter files found in '{project_path}'.")
+    images = _collect_image_assets(chapters, project_path)
 
     title = _resolve_book_title(project_data, project_path, chapters)
     author = "AI Book Creator"
@@ -47,7 +55,8 @@ def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathL
         _write_mimetype(epub)
         _write_container(epub)
         _write_nav(epub, title, chapters)
-        _write_chapters(epub, chapters)
+        _write_chapters(epub, chapters, project_path, images)
+        _write_images(epub, images)
         _write_css(epub)
         _write_content_opf(
             epub,
@@ -58,6 +67,7 @@ def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathL
             language=language,
             created_at=created_at,
             chapters=chapters,
+            images=images,
         )
 
     return str(output_file)
@@ -193,6 +203,32 @@ def _write_css(epub: zipfile.ZipFile) -> None:
             margin: 0 0 0.85em;
             text-align: left;
         }
+        blockquote {
+            margin: 1em 0;
+            padding: 0.2em 1em;
+            border-left: 0.2em solid #999;
+            color: #444;
+        }
+        ul, ol {
+            margin: 0 0 0.85em 1.5em;
+            padding: 0;
+        }
+        li {
+            margin: 0 0 0.35em;
+        }
+        figure {
+            margin: 1.2em auto;
+            text-align: center;
+        }
+        figure img {
+            max-width: 100%;
+            height: auto;
+        }
+        figcaption {
+            font-size: 0.9em;
+            color: #555;
+            margin-top: 0.4em;
+        }
         .chapter {
             max-width: 42em;
             margin: 0 auto;
@@ -207,30 +243,27 @@ def _write_css(epub: zipfile.ZipFile) -> None:
     epub.writestr("OEBPS/styles/style.css", css)
 
 
-def _write_chapters(epub: zipfile.ZipFile, chapters: Iterable[EbookChapter]) -> None:
+def _write_chapters(epub: zipfile.ZipFile, chapters: Iterable[EbookChapter], project_path: Path, images: list[EbookImage]) -> None:
+    image_lookup = {image.source_path.resolve(): image for image in images}
     for chapter in chapters:
-        xhtml = _render_chapter_xhtml(chapter)
+        xhtml = _render_chapter_xhtml(chapter, project_path, image_lookup)
         epub.writestr(f"OEBPS/text/chapter-{chapter.number:02d}.xhtml", xhtml)
 
 
-def _render_chapter_xhtml(chapter: EbookChapter) -> str:
+def _write_images(epub: zipfile.ZipFile, images: list[EbookImage]) -> None:
+    for image in images:
+        epub.write(image.source_path, f"OEBPS/{image.epub_path}")
+
+
+def _render_chapter_xhtml(chapter: EbookChapter, project_path: Path, image_lookup: dict[Path, EbookImage]) -> str:
     title, body_blocks = _split_chapter_content(chapter.content)
     heading = html.escape(title or chapter.title)
     paragraphs = []
     for block in body_blocks:
-        block = block.strip()
-        if not block:
+        rendered = _render_markdown_block(block, Path(chapter.filename).parent if chapter.filename else project_path, image_lookup)
+        if not rendered:
             continue
-        if block.startswith("###"):
-            paragraphs.append(f"<h2>{html.escape(block.lstrip('#').strip())}</h2>")
-            continue
-        if block.startswith("##"):
-            paragraphs.append(f"<h2>{html.escape(block.lstrip('#').strip())}</h2>")
-            continue
-        if block.startswith("#"):
-            paragraphs.append(f"<h1>{html.escape(block.lstrip('#').strip())}</h1>")
-            continue
-        paragraphs.append(f"<p>{_inline_format(block)}</p>")
+        paragraphs.extend(rendered)
 
     body_html = "\n      ".join(paragraphs) if paragraphs else "<p></p>"
     return f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -248,6 +281,90 @@ def _render_chapter_xhtml(chapter: EbookChapter) -> str:
   </body>
 </html>
 """
+
+
+def _render_markdown_block(block: str, base_dir: Path, image_lookup: dict[Path, EbookImage]) -> list[str]:
+    lines = [line.rstrip() for line in block.splitlines()]
+    output: list[str] = []
+    paragraph_buffer: list[str] = []
+    list_kind: str | None = None
+    list_items: list[str] = []
+    quote_lines: list[str] = []
+
+    def flush_paragraph() -> None:
+        nonlocal paragraph_buffer
+        if paragraph_buffer:
+            output.append(f"<p>{_inline_format(' '.join(paragraph_buffer).strip(), base_dir, image_lookup)}</p>")
+            paragraph_buffer = []
+
+    def flush_list() -> None:
+        nonlocal list_kind, list_items
+        if list_items:
+            tag = "ol" if list_kind == "ol" else "ul"
+            output.append(f"<{tag}>" + "".join(f"<li>{item}</li>" for item in list_items) + f"</{tag}>")
+            list_items = []
+            list_kind = None
+
+    def flush_quote() -> None:
+        nonlocal quote_lines
+        if quote_lines:
+            quote_text = " ".join(quote_lines).strip()
+            output.append(f"<blockquote><p>{_inline_format(quote_text, base_dir, image_lookup)}</p></blockquote>")
+            quote_lines = []
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            flush_paragraph()
+            flush_list()
+            flush_quote()
+            continue
+
+        if re.fullmatch(r"(\*\s*){3,}|(-\s*){3,}|_{3,}", line):
+            flush_paragraph()
+            flush_list()
+            flush_quote()
+            output.append('<div class="scene-break">***</div>')
+            continue
+
+        heading_match = re.match(r"^(#{1,6})\s+(.+)$", line)
+        if heading_match:
+            flush_paragraph()
+            flush_list()
+            flush_quote()
+            level = min(len(heading_match.group(1)), 6)
+            text = _inline_format(heading_match.group(2), base_dir, image_lookup)
+            output.append(f"<h{level}>{text}</h{level}>")
+            continue
+
+        quote_match = re.match(r"^>\s?(.*)$", line)
+        if quote_match:
+            flush_paragraph()
+            flush_list()
+            quote_lines.append(quote_match.group(1).strip())
+            continue
+
+        unordered_match = re.match(r"^[-*+]\s+(.+)$", line)
+        ordered_match = re.match(r"^\d+\.\s+(.+)$", line)
+        if unordered_match or ordered_match:
+            flush_paragraph()
+            flush_quote()
+            kind = "ol" if ordered_match else "ul"
+            if list_kind and list_kind != kind:
+                flush_list()
+            list_kind = kind
+            item_text = ordered_match.group(1) if ordered_match else unordered_match.group(1)
+            list_items.append(_inline_format(item_text, base_dir, image_lookup))
+            continue
+
+        flush_quote()
+        flush_list()
+        paragraph_buffer.append(line)
+
+    flush_paragraph()
+    flush_list()
+    flush_quote()
+    return output
 
 
 def _split_chapter_content(content: str) -> tuple[str, list[str]]:
@@ -284,11 +401,72 @@ def _split_chapter_content(content: str) -> tuple[str, list[str]]:
     return title, blocks
 
 
-def _inline_format(text: str) -> str:
+def _inline_format(text: str, base_dir: Path, image_lookup: dict[Path, EbookImage]) -> str:
+    image_markers: dict[str, str] = {}
+
+    def replace_image(match: re.Match[str]) -> str:
+        alt_text = match.group(1).strip()
+        target = match.group(2).strip()
+        resolved = _resolve_markdown_path(base_dir, target)
+        image = image_lookup.get(resolved.resolve()) if resolved else None
+        if image is None:
+            marker = f"__IMAGE_MISSING_{len(image_markers)}__"
+            image_markers[marker] = f'<span class="image-missing">[Image: {html.escape(alt_text)}]</span>'
+            return marker
+        marker = f"__IMAGE_{len(image_markers)}__"
+        image_html = (
+            f'<figure class="image-block">'
+            f'<img src="../{html.escape(image.epub_path)}" alt="{html.escape(alt_text)}" />'
+            f'{f"<figcaption>{html.escape(alt_text)}</figcaption>" if alt_text else ""}'
+            f"</figure>"
+        )
+        image_markers[marker] = image_html
+        return marker
+
+    text = re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", replace_image, text)
     escaped = html.escape(text)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
-    escaped = re.sub(r"\*(.+?)\*", r"<em>\1</em>", escaped)
+    escaped = re.sub(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)", r"<em>\1</em>", escaped)
+    escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
+    for marker, image_html in image_markers.items():
+        escaped = escaped.replace(html.escape(marker), image_html)
     return escaped
+
+
+def _resolve_markdown_path(base_dir: Path, target: str) -> Path | None:
+    target_path = Path(target)
+    if target_path.is_absolute():
+        return target_path if target_path.exists() else None
+    resolved = (base_dir / target_path).resolve()
+    return resolved if resolved.exists() else None
+
+
+def _collect_image_assets(chapters: Iterable[EbookChapter], project_path: Path) -> list[EbookImage]:
+    seen: dict[Path, EbookImage] = {}
+    counters: dict[str, int] = {}
+    for chapter in chapters:
+        chapter_dir = Path(chapter.filename).parent if chapter.filename else project_path
+        for match in re.finditer(r"!\[[^\]]*\]\(([^)]+)\)", chapter.content):
+            resolved = _resolve_markdown_path(chapter_dir, match.group(1).strip())
+            if resolved is None:
+                continue
+            resolved = resolved.resolve()
+            if resolved in seen:
+                continue
+            ext = resolved.suffix.lower()
+            media_type = {
+                ".jpg": "image/jpeg",
+                ".jpeg": "image/jpeg",
+                ".png": "image/png",
+                ".gif": "image/gif",
+                ".svg": "image/svg+xml",
+                ".webp": "image/webp",
+            }.get(ext, "application/octet-stream")
+            counters.setdefault(ext or ".bin", 0)
+            counters[ext or ".bin"] += 1
+            epub_name = f"images/image-{counters[ext or '.bin']:03d}{ext or '.bin'}"
+            seen[resolved] = EbookImage(source_path=resolved, epub_path=epub_name, media_type=media_type)
+    return list(seen.values())
 
 
 def _write_content_opf(
@@ -301,6 +479,7 @@ def _write_content_opf(
     language: str,
     created_at: str,
     chapters: Iterable[EbookChapter],
+    images: Iterable[EbookImage],
 ) -> None:
     manifest_items = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -314,6 +493,11 @@ def _write_content_opf(
             f'<item id="{item_id}" href="{file_name}" media-type="application/xhtml+xml"/>'
         )
         spine_items.append(f'<itemref idref="{item_id}"/>')
+    for index, image in enumerate(images, start=1):
+        item_id = f"image-{index:03d}"
+        manifest_items.append(
+            f'<item id="{item_id}" href="{image.epub_path}" media-type="{image.media_type}"/>'
+        )
 
     opf = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id" xml:lang="{xml_escape(language)}">
