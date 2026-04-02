@@ -85,11 +85,12 @@ python main.py
 
 ### Project management CLI
 
-The top-level [`utils.py`](utils.py:1) is a thin wrapper around `ai_book_creator.project_cli` and provides a lightweight CLI for managing projects (list, status, backup, export-glossary, clean). Run it from the repository root:
+The top-level [`utils.py`](utils.py:1) is a thin wrapper around `ai_book_creator.project_cli` and provides a lightweight CLI for managing projects (list, status, backup, export-glossary, export-ebook, clean). Run it from the repository root:
 
 ```bash
 python utils.py list
 python utils.py status <project_dir>
+python utils.py export-ebook <project_dir>
 ```
 
 If your environment does not include the repo root on `PYTHONPATH`, you can run it with `PYTHONPATH` set explicitly:

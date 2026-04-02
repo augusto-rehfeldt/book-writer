@@ -8,6 +8,7 @@ import os
 from datetime import datetime
 
 from .core.project_manager import ProjectManager, STEP_SEQUENCE
+from .utils.ebook_exporter import export_epub
 from .utils.glossary_manager import GlossaryManager
 
 
@@ -157,6 +158,19 @@ def export_glossary(project_dir: str, format: str = "txt") -> None:
         print(f"Export failed: {e}")
 
 
+def export_ebook(project_dir: str, output_file: str | None = None) -> None:
+    """Export the generated chapters as an EPUB ebook."""
+    if not os.path.exists(project_dir):
+        print(f"Project directory '{project_dir}' not found.")
+        return
+
+    try:
+        epub_path = export_epub(project_dir, output_file)
+        print(f"Ebook exported to: {epub_path}")
+    except Exception as e:
+        print(f"Ebook export failed: {e}")
+
+
 def clean_project(project_dir: str) -> None:
     """Clean up temporary files from a project."""
     if not os.path.exists(project_dir):
@@ -231,6 +245,12 @@ def main() -> None:
         "--format", choices=["txt", "json"], default="txt", help="Export format"
     )
 
+    ebook_parser = subparsers.add_parser(
+        "export-ebook", help="Export project chapters as an EPUB ebook"
+    )
+    ebook_parser.add_argument("project_dir", help="Project directory")
+    ebook_parser.add_argument("--output", help="Optional EPUB output path")
+
     clean_parser = subparsers.add_parser("clean", help="Clean temporary files")
     clean_parser.add_argument("project_dir", help="Project directory to clean")
 
@@ -252,6 +272,8 @@ def main() -> None:
         backup_project(args.project_dir, args.output)
     elif args.command == "export-glossary":
         export_glossary(args.project_dir, args.format)
+    elif args.command == "export-ebook":
+        export_ebook(args.project_dir, args.output)
     elif args.command == "clean":
         clean_project(args.project_dir)
     elif args.command == "repair":
