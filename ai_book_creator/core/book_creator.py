@@ -13,6 +13,7 @@ from ..steps.step_0_init import InitStep
 from ..steps.step_1_structure import StructureStep
 from ..steps.step_2_write import WriteStep
 from ..steps.step_3_review import ReviewStep
+from ..steps.step_4_ebook import EbookStep
 from ..utils.glossary_manager import GlossaryManager
 from ..utils.text_utils import calculate_page_count
 
@@ -43,7 +44,8 @@ class AIBookCreator:
             0: InitStep(self.ai_service, self.project_manager),
             1: StructureStep(self.ai_service, self.project_manager, self.glossary_manager),
             2: WriteStep(self.ai_service, self.project_manager, self.glossary_manager, self.output_dir),
-            3: ReviewStep(self.ai_service, self.project_manager, self.output_dir)
+            3: ReviewStep(self.ai_service, self.project_manager, self.output_dir),
+            4: EbookStep(self.ai_service, self.project_manager, self.output_dir),
         }
         
         print("✅ AI Book Creator initialized successfully!")
@@ -227,6 +229,7 @@ class AIBookCreator:
             "structure": "Step 1: Chapter Structure",
             "written": "Step 2: Writing Chapters",
             "reviewed": "Step 3: Review",
+            "ebook": "Step 4: Ebook Export",
         }
         return labels.get(step_name, step_name)
 

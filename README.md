@@ -38,7 +38,8 @@ ai_book_creator/
 │   ├── step_0_init.py         # Book concept gathering
 │   ├── step_1_structure.py    # Chapter structure
 │   ├── step_2_write.py        # Full chapter writing
-│   └── step_3_review.py       # Final consistency check
+│   ├── step_3_review.py       # Final consistency check
+│   └── step_4_ebook.py        # EPUB export
 └── utils/
     ├── glossary_manager.py    # Glossary tracking system
     └── text_utils.py          # Word/page utilities
@@ -129,6 +130,11 @@ The system automatically detects and resumes existing projects. All progress is 
 - Run a consistency and quality review
 - Cache the analysis and final summary
 - Mark the project complete or leave it ready for another pass
+
+### Step 4: Ebook Export
+- Build an EPUB from the generated chapters
+- Preserve markdown formatting in the exported ebook
+- Save the ebook alongside the project output
 
 ### Optional Repair
 - Use `python utils.py repair book_output` to clear later steps if the saved project becomes inconsistent

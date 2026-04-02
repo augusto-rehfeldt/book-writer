@@ -258,7 +258,7 @@ def main() -> None:
     repair_parser.add_argument("project_dir", help="Project directory to repair")
     repair_parser.add_argument(
         "--from-step",
-        choices=["init", "structure", "written", "reviewed"],
+        choices=["init", "structure", "written", "reviewed", "ebook"],
         help="Optional step name to clear from instead of the detected restart point",
     )
 
