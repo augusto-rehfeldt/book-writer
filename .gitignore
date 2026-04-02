@@ -1,0 +1,27 @@
+# Outputs and generated assets
+book_output/
+
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*.pyc
+
+# Local/OS files
+.DS_Store
+Thumbs.db
+
+# Venvs
+.venv/
+venv/
+
+# AI caches
+.ai_cache/
+
+# Secrets and local-only overrides
+ai_book_creator/config/*.local.json
+ai_book_creator/config/*key*.txt
+
+# Env files
+.env
+.env.local
+

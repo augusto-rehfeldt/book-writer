@@ -1,0 +1,174 @@
+"""
+Step 2: Write Chapters - Generate complete chapter text
+"""
+
+import os
+import time
+import json
+from typing import Dict, Any
+from .base_step import BaseStep
+from ..core.project_manager import BrokenProjectStateError
+from ..utils.text_utils import calculate_word_count, calculate_page_count
+
+
+class WriteStep(BaseStep):
+    def __init__(self, ai_service, project_manager, glossary_manager, output_dir):
+        super().__init__(ai_service, project_manager, glossary_manager)
+        self.step_name = "written"
+        self.output_dir = output_dir
+        self.config = self._load_config()
+
+    def _load_config(self):
+        config_path = os.getenv(
+            "AI_CONFIG_PATH",
+            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_google.json"),
+        )
+        with open(config_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+
+    def should_execute(self) -> bool:
+        existing = self.get_step_data()
+        chapters = existing.get("chapters", {})
+        if not self.is_completed():
+            return True
+        if not chapters:
+            return True
+
+        structure_data = self.project_manager.get_step_data("structure")
+        expected_count = len(structure_data.get("chapter_plots", {}))
+        if expected_count and len(chapters) != expected_count:
+            return True
+
+        for chapter_info in chapters.values():
+            filename = chapter_info.get("filename")
+            if not filename or not os.path.exists(filename):
+                return True
+
+        return False
+    
+    def get_step_header(self) -> str:
+        return "="*60 + "\n✍️ STEP 2: WRITING CHAPTERS\n" + "="*60
+    
+    def execute(self) -> Dict[str, Any]:
+        init_data = self.project_manager.get_step_data("init")
+        structure_data = self.project_manager.get_step_data("structure")
+        existing_written_data = self.project_manager.get_step_data("written") or {}
+        
+        written_chapters = dict(existing_written_data.get("chapters", {}))
+        total_word_count = 0
+
+        for chapter_info in written_chapters.values():
+            filename = chapter_info.get("filename")
+            if filename and os.path.exists(filename):
+                try:
+                    with open(filename, "r", encoding="utf-8") as f:
+                        total_word_count += calculate_word_count(f.read())
+                except Exception:
+                    total_word_count += int(chapter_info.get("word_count", 0))
+            else:
+                total_word_count += int(chapter_info.get("word_count", 0))
+        
+        chapter_plots = structure_data.get("chapter_plots", {})
+        min_words = self.config.get("min_chapter_words", 1000)
+        
+        for chapter_key, chapter_data in chapter_plots.items():
+            existing_chapter = written_chapters.get(chapter_key)
+            existing_filename = existing_chapter.get("filename") if existing_chapter else None
+            if existing_chapter and existing_filename and os.path.exists(existing_filename):
+                print(f"\nSkipping already cached {chapter_data['title']}...")
+                continue
+
+            print(f"\nWriting {chapter_data['title']}...")
+            
+            glossary_context = ""
+            if self.glossary_manager:
+                glossary_context = self.glossary_manager.get_context_for_writing()
+            
+            prompt = f"""Write complete chapter text:
+
+CHAPTER: {chapter_data['title']}
+PLOT OUTLINE: {chapter_data['plot_outline']}
+
+{glossary_context}
+
+Write at least {min_words} words.
+- Creative, authentic prose
+- Natural dialogue
+- Varied pacing
+- Clean, modern style
+- Show, don't tell
+- CRITICAL: DO NOT start the chapter with an ambient, exhaustive description of the environment, scenery, or weather.
+- Start boldly with character action, immediate dialogue, or a character's engaging inner thought.
+- Keep the narration character-driven and humane rather than detached.
+
+Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently placed at the very top of the text."""
+            
+            text = self.ai_service.generate_content(
+                prompt,
+                model_type="writing",
+                max_completion_tokens=4096,
+            )
+            if not text.strip():
+                raise BrokenProjectStateError(
+                    f"Chapter text generation returned empty content for {chapter_data['title']}. "
+                    "The step will be retried so the missing chapter is not skipped."
+                )
+            word_count = calculate_word_count(text)
+            
+            # Save chapter
+            chapter_num = chapter_data['chapter_number']
+            filename = os.path.join(self.output_dir, f"chapter_{chapter_num:02d}.txt")
+            
+            with open(filename, 'w', encoding='utf-8') as f:
+                f.write(text)
+
+            written_chapters[chapter_key] = {
+                "title": chapter_data["title"],
+                "chapter_number": chapter_num,
+                "filename": filename,
+                "word_count": word_count
+            }
+
+            total_word_count += word_count
+            
+            if self.glossary_manager:
+                self.glossary_manager.auto_populate_from_chapter(
+                    text, chapter_data['title'], self.ai_service
+                )
+            
+            print(f"Completed ({word_count} words)")
+            written_data = {
+                "chapters": written_chapters,
+                "total_word_count": total_word_count,
+                "total_pages": calculate_page_count(total_word_count),
+                "_partial": True,
+            }
+            self.save_step_data(written_data)
+            time.sleep(2)
+
+        if not written_chapters:
+            recovery = self.project_manager.get_recovery_plan()
+            raise BrokenProjectStateError(
+                "Step 2 produced no written chapters. "
+                f"{recovery['message']}",
+                latest_valid_step=recovery.get("latest_valid_step", ""),
+                restart_step=recovery.get("restart_step", ""),
+                broken_steps=recovery.get("broken_steps", []),
+            )
+        
+        total_pages = calculate_page_count(total_word_count)
+        
+        print(f"\n✅ WRITING COMPLETE!")
+        print(f"Chapters: {len(written_chapters)}")
+        print(f"Words: {total_word_count:,}")
+        print(f"Pages: {total_pages}")
+        
+        written_data = {
+            "chapters": written_chapters,
+            "total_word_count": total_word_count,
+            "total_pages": total_pages
+        }
+        
+        self.save_step_data(written_data)
+        self.mark_completed()
+        return written_data
