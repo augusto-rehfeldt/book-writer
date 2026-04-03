@@ -4,7 +4,7 @@ Step 1: Create Structure - Chapter breakdown with plots
 
 import re
 import time
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Optional
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
 from ..utils.name_generator import generate_name_pools, pick_random_name
@@ -40,7 +40,7 @@ class StructureStep(BaseStep):
         structure_content = existing_data.get("structure_content", "")
         chapter_plots = dict(existing_data.get("chapter_plots", {}))
 
-        # --- NEW: Generate name pools if not already present ---
+        # --- Generate name pools if not already present ---
         name_pools = self.project_manager.book_data.get("name_pools")
         if not name_pools:
             print("\n🎲 Generating name pools to avoid repetitive AI names...")
@@ -49,14 +49,25 @@ class StructureStep(BaseStep):
                 layout_content=init_data.get("layout_content", ""),
                 series_layout=init_data.get("series_layout_content", ""),
                 ai_service=self.ai_service,
-                pool_size=30,  # configurable
+                pool_size=30,
             )
             self.project_manager.book_data["name_pools"] = name_pools
             self.project_manager.save_project()
-            # Also store in glossary manager for later use
             if self.glossary_manager:
                 self.glossary_manager.set_name_pools(name_pools)
             print(f"✅ Generated {len(name_pools)} name pools.")
+
+        # --- NEW: Replace AI-generated character names with random names from pools ---
+        layout_content = init_data.get("layout_content", "")
+        if layout_content and name_pools:
+            new_layout, replaced_count = self._replace_character_names_with_pools(
+                layout_content, name_pools, init_data
+            )
+            if replaced_count > 0:
+                print(f"🎭 Replaced {replaced_count} character names using name pools.")
+                init_data["layout_content"] = new_layout
+                self.project_manager.set_step_data("init", init_data)
+                self.project_manager.save_project()
 
         # Create chapter breakdown only when we do not already have cached structure text
         if not structure_content:
@@ -92,18 +103,105 @@ class StructureStep(BaseStep):
         self.save_step_data(structure_data)
         self.mark_completed()
         return structure_data
-    
+
+    # -------------------------------------------------------------------------
+    # NEW: Replace AI‑generated character names with random picks from pools
+    # -------------------------------------------------------------------------
+    def _replace_character_names_with_pools(
+        self, layout_content: str, name_pools: Dict[str, List[str]], init_data: Dict
+    ) -> tuple[str, int]:
+        """
+        Parse the "Main Characters" section in the layout, replace each name
+        with a random name from the appropriate pool, and return the updated
+        layout and the number of replacements.
+        """
+        # Find the "Main Characters" section
+        main_char_section_match = re.search(
+            r"(?i)(?:##\s*Main\s+Characters|###\s*Main\s+Characters)(.*?)(?=\n##|\n###|\Z)",
+            layout_content,
+            re.DOTALL,
+        )
+        if not main_char_section_match:
+            return layout_content, 0
+
+        section_text = main_char_section_match.group(1)
+        original_section = section_text
+        replaced_count = 0
+        new_section_lines = []
+
+        # Pattern to match a character entry:
+        # Either "1. **Name**" or "- **Name**" or just "**Name**" on its own line
+        # Followed by role/description lines (starting with "- **Role:**" etc.)
+        lines = section_text.splitlines()
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+            # Look for a line that contains a bold name
+            bold_name_match = re.search(r"\*\*([^*]+)\*\*", stripped)
+            if bold_name_match and not stripped.startswith(("Role", "Description", "- **Role")):
+                old_name = bold_name_match.group(1).strip()
+                # Determine a suitable pool category (default to "protagonists")
+                pool_category = "protagonists"
+                # Look at the next line for role hints
+                role_hint = ""
+                if i + 1 < len(lines):
+                    next_line = lines[i + 1].strip()
+                    if "Role:" in next_line or "role:" in next_line:
+                        role_hint = next_line
+                # Simple role mapping: if role contains "antagonist", use "antagonists"
+                if "antagonist" in role_hint.lower():
+                    pool_category = "antagonists"
+                elif "sidekick" in role_hint.lower() or "support" in role_hint.lower():
+                    pool_category = "supporting_characters"
+                # Pick a random name from the pool
+                new_name = pick_random_name(name_pools, pool_category, "any_character")
+                if not new_name:
+                    # Fallback: try any pool
+                    for pool in name_pools.values():
+                        if pool:
+                            new_name = pool[0]
+                            break
+                if new_name and new_name != old_name:
+                    # Replace in the line
+                    new_line = line.replace(f"**{old_name}**", f"**{new_name}**")
+                    new_section_lines.append(new_line)
+                    replaced_count += 1
+                    # Also update glossary manager with the new character
+                    if self.glossary_manager:
+                        # Collect description from following lines until next character
+                        desc_lines = []
+                        j = i + 1
+                        while j < len(lines) and not re.search(r"\*\*[^*]+\*\*", lines[j].strip()):
+                            desc_lines.append(lines[j].strip())
+                            j += 1
+                        description = " ".join(desc_lines).strip()
+                        if description:
+                            self.glossary_manager.add_character(new_name, description)
+                    i += 1
+                    continue
+            new_section_lines.append(line)
+            i += 1
+
+        if replaced_count == 0:
+            return layout_content, 0
+
+        # Rebuild the layout content with the modified section
+        new_section_text = "\n".join(new_section_lines)
+        new_layout = layout_content.replace(original_section, new_section_text)
+        return new_layout, replaced_count
+
+    # -------------------------------------------------------------------------
+    # Existing methods (unchanged except for small adjustments)
+    # -------------------------------------------------------------------------
     def _create_structure(self, init_data: Dict) -> str:
         print("🔄 Generating chapter structure...")
-
         prompt, max_completion_tokens = self._build_structure_prompt(init_data)
         structure = self.ai_service.generate_content(prompt, max_completion_tokens=max_completion_tokens)
-        
         print("\n📚 CHAPTER STRUCTURE:")
         print("-" * 50)
         print(structure)
         print("-" * 50)
-        
         return structure
 
     def _build_structure_prompt(self, init_data: Dict) -> tuple[str, int]:
@@ -191,7 +289,6 @@ class StructureStep(BaseStep):
     def _extract_chapters(self, content: str) -> List[Dict]:
         chapters = []
         lines = content.split('\n')
-        # Handle both numbered lists and markdown tables.
         numbered_pattern = re.compile(
             r"""^\s*(?:[*#>\-]\s*)?\d+\.\s*Chapter\s+(\d+)\s*[—–-]\s*(.+?)\s*$""",
             re.IGNORECASE,
@@ -253,7 +350,6 @@ class StructureStep(BaseStep):
         return chapters
 
     def _parse_numbered_outline(self, text: str) -> tuple[str, str, str, int, str]:
-        """Parse a numbered chapter line that may contain title, summary, and word count."""
         cleaned = re.sub(r"\*\*", "", text).strip()
         word_count_estimate = 1500
         word_count_match = re.search(
@@ -284,7 +380,6 @@ class StructureStep(BaseStep):
         )
 
     def _split_title_and_remainder(self, text: str) -> tuple[str, str]:
-        """Split a numbered outline entry into title and the remaining descriptive text."""
         primary_label_match = re.search(
             r"\b(?:opening style tag|summary|key events?)\s*:",
             text,
@@ -302,7 +397,6 @@ class StructureStep(BaseStep):
         return text.strip(" ,;:-."), ""
 
     def _extract_labeled_section(self, text: str, label: str) -> tuple[str, str]:
-        """Extract a labeled section from outline text and return the remaining text."""
         pattern = re.compile(
             rf"\b{re.escape(label)}\s*:\s*(.*?)(?=\b(?:opening style tag|summary|key events?|word count(?: estimate)?)\s*:|$)",
             re.IGNORECASE | re.DOTALL,
@@ -381,11 +475,10 @@ class StructureStep(BaseStep):
         chapter_plots = dict(self.get_step_data().get("chapter_plots", {}))
         series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900)
 
-        # Prepare a compact representation of name pools for the prompt
         name_pools_text = ""
         if name_pools:
             name_pools_text = "AVAILABLE NAME POOLS (use names from these lists when introducing new characters):\n"
-            for cat, names in list(name_pools.items())[:10]:  # limit to avoid huge prompts
+            for cat, names in list(name_pools.items())[:10]:
                 sample = ", ".join(names[:8])
                 name_pools_text += f"- {cat}: {sample}{'...' if len(names) > 8 else ''}\n"
 
@@ -408,7 +501,6 @@ class StructureStep(BaseStep):
             if self.glossary_manager:
                 glossary_context = self.glossary_manager.get_context_for_writing()
 
-            # Build prompt with name pools
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     f"Create a detailed plot outline for Chapter {chapter_number}: "
