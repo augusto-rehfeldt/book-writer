@@ -5,9 +5,9 @@ Glossary Manager - handles character, location, concept, and term tracking
 import os
 import json
 import re
+import random
 from datetime import datetime
-from typing import Dict, List, Any
-
+from typing import Dict, List, Any, Optional
 
 class GlossaryManager:
     def __init__(self, output_dir: str):
@@ -121,21 +121,35 @@ Only include truly important elements."""
             return {"characters": [], "locations": [], "concepts": []}
     
     def auto_populate_from_chapter(self, chapter_content: str, chapter_title: str, ai_service):
-        """Automatically populate glossary from a chapter"""
+        """Automatically populate glossary from a chapter, using name pools when possible."""
         extracted = self.extract_from_content(chapter_content, chapter_title, ai_service)
-        
-        for char in extracted.get("characters", []):
-            if char.get("name") and char["name"] not in self.glossary["characters"]:
-                self.add_character(char["name"], char.get("description", ""))
 
+        pools = self.get_name_pools()
+        # For characters, try to replace generic names with pool names
+        for char in extracted.get("characters", []):
+            raw_name = char.get("name", "")
+            if raw_name and raw_name not in self.glossary["characters"]:
+                # Check if this name matches any pool category keyword
+                assigned = False
+                for cat, name_list in pools.items():
+                    # If the raw name looks like a placeholder or is very generic, assign a pool name
+                    if raw_name.lower() in ["protagonist", "antagonist", "hero", "villain", "mc"]:
+                        new_name = self.get_random_name(cat)
+                        if new_name:
+                            self.add_character(new_name, char.get("description", ""))
+                            assigned = True
+                            break
+                if not assigned:
+                    self.add_character(raw_name, char.get("description", ""))
+
+        # Locations and concepts can be added normally
         for loc in extracted.get("locations", []):
             if loc.get("name") and loc["name"] not in self.glossary["locations"]:
                 self.add_location(loc["name"], loc.get("description", ""))
-
         for concept in extracted.get("concepts", []):
             if concept.get("name") and concept["name"] not in self.glossary["concepts"]:
                 self.add_concept(concept["name"], concept.get("description", ""))
-        
+
         self.save_glossary()
 
 
@@ -202,3 +216,42 @@ Only include truly important elements."""
                 context += f"• {term}: {concept['description']}\n"
         
         return context + "\n"
+    
+    def set_name_pools(self, pools: Dict[str, List[str]]):
+        """Store name pools inside the glossary data."""
+        self.glossary["_name_pools"] = pools
+        self.save_glossary()
+
+    def get_name_pools(self) -> Dict[str, List[str]]:
+        """Retrieve stored name pools."""
+        return self.glossary.get("_name_pools", {})
+
+    def get_random_name(self, category: str, fallback_category: str = "any_character") -> Optional[str]:
+        """Pick a random name from the given category pool."""
+        pools = self.get_name_pools()
+        pool = pools.get(category)
+        if pool:
+            return random.choice(pool)
+        fallback = pools.get(fallback_category)
+        if fallback:
+            return random.choice(fallback)
+        return None
+
+    def assign_name_to_character(self, character_name: str, category: str = "protagonist") -> Optional[str]:
+        """
+        If the character doesn't already have a name, assign a random name from the pool.
+        Returns the assigned name (or the existing one).
+        """
+        # character_name is a placeholder like "[PROTAGONIST]"
+        if character_name not in self.glossary["characters"]:
+            new_name = self.get_random_name(category)
+            if new_name:
+                self.glossary["characters"][new_name] = {
+                    "name": new_name,
+                    "description": f"Originally described as {character_name}",
+                    "category": category,
+                    "assigned": True
+                }
+                self.save_glossary()
+                return new_name
+        return character_name

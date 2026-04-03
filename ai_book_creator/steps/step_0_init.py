@@ -7,7 +7,7 @@ from typing import Dict, Any
 import math
 
 from .base_step import BaseStep
-from ..utils.text_utils import calculate_page_count, pages_to_words
+from ..utils.text_utils import pages_to_words
 
 
 class InitStep(BaseStep):

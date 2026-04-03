@@ -34,6 +34,7 @@ class EbookStep(BaseStep):
     def execute(self) -> Dict[str, Any]:
         written_data = self.project_manager.get_step_data("written")
         reviewed_data = self.project_manager.get_step_data("reviewed")
+        init_data = self.project_manager.get_step_data("init")
         chapters = written_data.get("chapters", {})
 
         if not chapters:
@@ -56,8 +57,30 @@ class EbookStep(BaseStep):
                 broken_steps=recovery.get("broken_steps", []),
             )
 
+        print("📝 Generating a catchy book description for the EPUB metadata...")
+        book_idea = init_data.get("book_idea", "")
+        analysis = reviewed_data.get("analysis", "")
+        
+        prompt = self.ai_service.build_sectioned_prompt(
+            instruction=(
+                "Write a catchy, compelling back-cover blurb (book description) for this book. "
+                "Make it engaging for readers, highlighting the stakes, characters, and central conflict. "
+                "Keep it to 2-3 short paragraphs. Output ONLY the description text, no markdown, no quotes."
+            ),
+            sections=[
+                ("Book Concept", book_idea),
+                ("Book Analysis & Synopsis", analysis)
+            ]
+        )
+        
+        description = self.ai_service.generate_content(
+            prompt, 
+            model_type="writing", 
+            max_completion_tokens=500
+        ).strip()
+
         print("📦 Exporting EPUB ebook...")
-        output_file = export_epub(self.output_dir)
+        output_file = export_epub(self.output_dir, description=description)
         prompt_file = os.path.splitext(output_file)[0] + "_cover_prompt.txt"
         print(f"✅ Ebook exported to: {output_file}")
         print(f"📝 Cover prompt saved to: {prompt_file}")
@@ -65,6 +88,7 @@ class EbookStep(BaseStep):
         ebook_data = {
             "output_file": output_file,
             "prompt_file": prompt_file,
+            "description": description,
             "source_chapter_count": len(chapters),
             "source_written_word_count": int(written_data.get("total_word_count", 0)),
             "source_reviewed_word_count": int(reviewed_data.get("total_word_count", 0)),
@@ -86,4 +110,5 @@ class EbookStep(BaseStep):
             and int(existing.get("source_reviewed_word_count", 0)) == int(reviewed_data.get("total_word_count", 0))
             and bool(existing.get("prompt_file", ""))
             and os.path.exists(existing.get("prompt_file", ""))
+            and bool(existing.get("description", ""))
         )

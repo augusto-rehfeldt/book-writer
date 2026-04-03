@@ -7,6 +7,7 @@ import time
 from typing import Dict, Any, List
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
+from ..utils.name_generator import generate_name_pools, pick_random_name
 
 
 class StructureStep(BaseStep):
@@ -35,9 +36,27 @@ class StructureStep(BaseStep):
     def execute(self) -> Dict[str, Any]:
         init_data = self.project_manager.get_step_data("init")
         existing_data = self.get_step_data()
-        
+
         structure_content = existing_data.get("structure_content", "")
         chapter_plots = dict(existing_data.get("chapter_plots", {}))
+
+        # --- NEW: Generate name pools if not already present ---
+        name_pools = self.project_manager.book_data.get("name_pools")
+        if not name_pools:
+            print("\n🎲 Generating name pools to avoid repetitive AI names...")
+            name_pools = generate_name_pools(
+                book_idea=init_data.get("book_idea", ""),
+                layout_content=init_data.get("layout_content", ""),
+                series_layout=init_data.get("series_layout_content", ""),
+                ai_service=self.ai_service,
+                pool_size=30,  # configurable
+            )
+            self.project_manager.book_data["name_pools"] = name_pools
+            self.project_manager.save_project()
+            # Also store in glossary manager for later use
+            if self.glossary_manager:
+                self.glossary_manager.set_name_pools(name_pools)
+            print(f"✅ Generated {len(name_pools)} name pools.")
 
         # Create chapter breakdown only when we do not already have cached structure text
         if not structure_content:
@@ -49,12 +68,11 @@ class StructureStep(BaseStep):
             })
         else:
             print("📌 Reusing cached chapter structure from a previous run.")
-        
-        # Extract chapters
+
         chapters = self._extract_chapters(structure_content)
-        
-        # Create plots for each chapter
-        chapter_plots = self._create_plots(chapters, init_data)
+
+        # Create plots for each chapter (now with name pools injected)
+        chapter_plots = self._create_plots(chapters, init_data, name_pools)
 
         if not chapter_plots:
             recovery = self.project_manager.get_recovery_plan()
@@ -65,12 +83,12 @@ class StructureStep(BaseStep):
                 restart_step=recovery.get("restart_step", ""),
                 broken_steps=recovery.get("broken_steps", []),
             )
-        
+
         structure_data = {
             "structure_content": structure_content,
             "chapter_plots": chapter_plots
         }
-        
+
         self.save_step_data(structure_data)
         self.mark_completed()
         return structure_data
@@ -359,15 +377,24 @@ class StructureStep(BaseStep):
             return text
         return text[: max_chars - 3].rstrip() + "..."
     
-    def _create_plots(self, chapters: List[Dict], init_data: Dict) -> Dict:
+    def _create_plots(self, chapters: List[Dict], init_data: Dict, name_pools: Dict[str, List[str]]) -> Dict:
         chapter_plots = dict(self.get_step_data().get("chapter_plots", {}))
         series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900)
+
+        # Prepare a compact representation of name pools for the prompt
+        name_pools_text = ""
+        if name_pools:
+            name_pools_text = "AVAILABLE NAME POOLS (use names from these lists when introducing new characters):\n"
+            for cat, names in list(name_pools.items())[:10]:  # limit to avoid huge prompts
+                sample = ", ".join(names[:8])
+                name_pools_text += f"- {cat}: {sample}{'...' if len(names) > 8 else ''}\n"
+
         self.save_step_data({
             "structure_content": self.get_step_data().get("structure_content", ""),
             "chapter_plots": chapter_plots,
             "_partial": True,
         })
-        
+
         for i, chapter in enumerate(chapters, 1):
             chapter_number = int(chapter.get("chapter_number", i))
             chapter_key = f"chapter_{chapter_number}"
@@ -376,28 +403,28 @@ class StructureStep(BaseStep):
                 continue
 
             print(f"Creating plot for Chapter {chapter_number}: {chapter.get('title', f'Chapter {chapter_number}')}")
-            
+
             glossary_context = ""
             if self.glossary_manager:
                 glossary_context = self.glossary_manager.get_context_for_writing()
-            
+
+            # Build prompt with name pools
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     f"Create a detailed plot outline for Chapter {chapter_number}: "
                     f"{chapter.get('title', f'Chapter {chapter_number}')}. "
-                    "Be detailed but concise."
+                    "Be detailed but concise. "
+                    "When introducing new characters, use names from the provided name pools. "
+                    "If a character already exists in the glossary, reuse that name."
                 ),
                 sections=[
                     ("Book summary", init_data["book_idea"][:500]),
-                    *(
-                        [("Series layout", series_layout)]
-                        if series_layout
-                        else []
-                    ),
+                    *([("Series layout", series_layout)] if series_layout else []),
                     ("Chapter summary", chapter.get("content", "")),
                     ("Opening style tag", chapter.get("opening_style", "")),
                     ("Requirements", "Opening scene; 3-5 key events; character interactions; conflict/tension; chapter ending/transition; emotional beats."),
                     ("Glossary context", glossary_context),
+                    ("Name pools", name_pools_text),
                 ],
                 max_prompt_tokens=7000,
                 section_token_caps={
@@ -407,16 +434,17 @@ class StructureStep(BaseStep):
                     "Opening style tag": 60,
                     "Requirements": 250,
                     "Glossary context": 500,
+                    "Name pools": 600,
                 },
             )
-            
+
             plot = self.ai_service.generate_content(prompt, max_completion_tokens=1200)
             if not plot.strip():
                 raise BrokenProjectStateError(
                     f"Chapter plot generation returned empty content for Chapter {chapter_number}. "
                     "The step will be retried so the missing chapter is not skipped."
                 )
-            
+
             if plot.strip():
                 chapter_plots[chapter_key] = {
                     "title": chapter.get("title", f"Chapter {chapter_number}"),
@@ -425,7 +453,7 @@ class StructureStep(BaseStep):
                     "opening_style": chapter.get("opening_style", ""),
                     "word_count_estimate": int(chapter.get("word_count_estimate", 1500)),
                 }
-                
+
                 if self.glossary_manager:
                     self.glossary_manager.auto_populate_from_chapter(
                         plot, chapter.get("title", f"Chapter {chapter_number}"), self.ai_service
@@ -451,8 +479,8 @@ class StructureStep(BaseStep):
                     "chapter_plots": chapter_plots,
                     "_partial": True,
                 })
-            
+
             time.sleep(1)
-        
+
         print(f"Created {len(chapter_plots)} chapter plots")
         return chapter_plots
