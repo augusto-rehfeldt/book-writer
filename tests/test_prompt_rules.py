@@ -52,6 +52,7 @@ class PromptRuleTests(unittest.TestCase):
             )
 
         self.assertIn("OPENING STYLE TAG: dialogue-led", prompt)
+        self.assertNotIn("Title:", prompt)
         self.assertIn("markdown intentionally", prompt.lower())
         self.assertIn("put the chapter title at the top as a level-1 markdown heading", prompt.lower())
         self.assertIn("use `##` or `###`", prompt.lower())
