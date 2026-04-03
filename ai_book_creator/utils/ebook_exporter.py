@@ -194,6 +194,10 @@ def _write_cover_prompt_file(output_file: Path, project_data: dict[str, Any], ti
 
 
 def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list[EbookChapter]) -> str:
+    """
+    Build an improved cover image prompt that asks for a background image only (no text).
+    The prompt focuses on artistic style, mood, and composition derived from the book's content.
+    """
     init_data = project_data.get("init", {}) if isinstance(project_data.get("init", {}), dict) else {}
     book_idea = str(init_data.get("book_idea", "")).strip()
     layout_content = str(init_data.get("layout_content", "")).strip()
@@ -201,6 +205,7 @@ def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list
     written = project_data.get("written", {}) if isinstance(project_data.get("written", {}), dict) else {}
     reviewed = project_data.get("reviewed", {}) if isinstance(project_data.get("reviewed", {}), dict) else {}
 
+    # Extract key visual elements
     chapter_titles = [chapter.title for chapter in chapters[:5] if chapter.title]
     mood = _extract_cover_mood(layout_content) or "dramatic and cinematic"
     genre = _extract_cover_genre(layout_content) or "literary fiction"
@@ -208,24 +213,32 @@ def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list
     if not visual_keywords and chapter_titles:
         visual_keywords = chapter_titles[:3]
 
-    prompt_lines = [
-        f"Book cover prompt for: {title}",
-        f"Create a striking, professional book cover in a {mood} style for a {genre} novel.",
-        "Square composition, strong focal point, polished lighting, high-detail digital illustration.",
+    # Build a rich, descriptive prompt focusing on background art without text
+    prompt_parts = [
+        f"Create a stunning, high-resolution background image for a book cover. The image must contain NO text, NO title, NO author name, and NO typography of any kind. Only the visual scene.",
+        f"Genre: {genre}.",
+        f"Mood/Atmosphere: {mood}.",
+        "Composition: Wide cinematic shot, strong focal point, balanced negative space for potential text placement (even though no text will be added).",
+        "Style: Digital painting, rich textures, dramatic lighting, professional illustration quality.",
+        "Color palette: Evocative of the genre and mood.",
     ]
-    if book_idea:
-        prompt_lines.append(f"Story premise: {book_idea}")
-    if series_layout_content:
-        prompt_lines.append(f"Series context: {series_layout_content[:900]}")
-    if visual_keywords:
-        prompt_lines.append(f"Include these visual elements: {', '.join(visual_keywords[:6])}.")
-    if chapter_titles:
-        prompt_lines.append(f"Key chapter or scene cues: {', '.join(chapter_titles[:5])}.")
-    if written.get("total_word_count"):
-        prompt_lines.append(f"Manuscript length: {int(written.get('total_word_count', 0)):,} words.")
-    prompt_lines.append("Do not add text overlays, watermarks, or logos.")
 
-    return "\n".join(prompt_lines).strip() + "\n"
+    if book_idea:
+        prompt_parts.append(f"Core story premise: {book_idea[:300]}")
+    if series_layout_content:
+        prompt_parts.append(f"Series context: {series_layout_content[:500]}")
+    if visual_keywords:
+        prompt_parts.append(f"Key visual elements to include: {', '.join(visual_keywords[:6])}.")
+    if chapter_titles:
+        prompt_parts.append(f"Suggestive scene references: {', '.join(chapter_titles[:5])}.")
+    if written.get("total_word_count"):
+        prompt_parts.append(f"Manuscript length: {int(written.get('total_word_count', 0)):,} words (epic scale).")
+
+    # Final instructions to ensure no text
+    prompt_parts.append("CRITICAL: Do NOT add any text, letters, numbers, titles, or author names. This is a pure background image.")
+    prompt_parts.append("Aspect ratio: 2:3 (portrait)")
+
+    return "\n".join(prompt_parts).strip() + "\n"
 
 
 def _extract_cover_mood(layout_content: str) -> str:
