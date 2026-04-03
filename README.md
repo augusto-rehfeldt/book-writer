@@ -109,6 +109,8 @@ The system automatically detects and resumes existing projects. All progress is 
 - **Glossary**: `book_output/glossary.json` - Detailed glossary database
 - **Final Glossary**: `book_output/book_glossary.txt` - Human-readable glossary
 - **Analysis**: `book_output/book_summary_and_analysis.txt` - Final book analysis
+- **Ebook**: `book_output/ebook/<title>.epub` - Final EPUB export
+- **Cover Prompt**: `book_output/ebook/<title>_cover_prompt.txt` - Image prompt for a cover generator
 
 ## Step-by-Step Process
 
@@ -134,7 +136,7 @@ The system automatically detects and resumes existing projects. All progress is 
 ### Step 4: Ebook Export
 - Build an EPUB from the generated chapters
 - Preserve markdown formatting in the exported ebook
-- Save the ebook alongside the project output
+- Save the ebook in `book_output/ebook/`
 
 ### Optional Repair
 - Use `python utils.py repair book_output` to clear later steps if the saved project becomes inconsistent

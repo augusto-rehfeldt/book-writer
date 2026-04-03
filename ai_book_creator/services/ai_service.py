@@ -84,6 +84,8 @@ class DailyTokenBudgetExceeded(UsageLimitExceeded):
 
 
 class AIService:
+    OPENAI_BIG_MODELS = {"gpt-5.4"}
+
     def __init__(
         self,
         config_path: Optional[str] = None,
@@ -109,6 +111,11 @@ class AIService:
         self.api_key = self._resolve_api_key()
         self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "gpt-5-mini"))
         self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "gpt-5"))
+        self.openai_big_models = {
+            str(model).strip().lower()
+            for model in self.config.get("openai_big_models", list(self.OPENAI_BIG_MODELS))
+            if str(model).strip()
+        }
         self.base_url = self._resolve_base_url()
         self.use_openai_client = bool(self.config.get("use_openai_client", True))
         self.timeout = int(self.config.get("timeout", 900))
@@ -310,7 +317,10 @@ class AIService:
             print(f"Warning: Could not save Groq rate state '{self.groq_rate_state_path}': {e}")
 
     def _bucket_for_model(self, model_name: str) -> str:
-        return "mini" if "mini" in model_name.lower() else "pro"
+        normalized = model_name.lower()
+        if normalized in self.openai_big_models:
+            return "pro"
+        return "mini" if "mini" in normalized else "pro"
 
     def _estimate_tokens(self, text: str) -> int:
         return max(1, math.ceil(len(text) / 4))

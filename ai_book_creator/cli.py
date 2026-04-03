@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+from datetime import datetime
 from pathlib import Path
 
 from .env import load_local_env
@@ -24,6 +26,7 @@ PROVIDER_CONFIG_MAP = {
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
+PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 
 
 def _load_last_provider(default_provider: str = "google") -> str:
@@ -80,6 +83,89 @@ def _prompt_resume_existing_project() -> bool:
         print("Please answer yes or no.")
 
 
+def _prompt_stash_previous_ebooks() -> bool:
+    prompt = "Stash existing EPUBs before starting fresh? [Y/n]: "
+    while True:
+        try:
+            choice = input(prompt).strip().lower()
+        except EOFError:
+            return True
+
+        if choice in ("", "y", "yes"):
+            return True
+        if choice in ("n", "no"):
+            return False
+        print("Please answer yes or no.")
+
+
+def _collect_previous_ebooks() -> list[Path]:
+    if not PROJECT_OUTPUT_DIR.exists():
+        return []
+
+    ebooks: list[Path] = []
+    for path in PROJECT_OUTPUT_DIR.rglob("*.epub"):
+        try:
+            relative = path.relative_to(PROJECT_OUTPUT_DIR)
+        except ValueError:
+            continue
+        if "archive" in relative.parts:
+            continue
+        ebooks.append(path)
+    return ebooks
+
+
+def _has_previous_generated_artifacts() -> bool:
+    if _collect_previous_ebooks():
+        return True
+
+    patterns = [
+        "project_data.json",
+        "glossary.json",
+        "book_analysis.txt",
+        "book_glossary.txt",
+        "ai_usage_state.json",
+        "groq_usage_state.json",
+        "checkpoint_*.json",
+        "chapter_*.txt",
+    ]
+    for pattern in patterns:
+        if any(PROJECT_OUTPUT_DIR.glob(pattern)):
+            return True
+    return False
+
+
+def _unique_target_path(directory: Path, filename: str) -> Path:
+    target = directory / filename
+    if not target.exists():
+        return target
+
+    stem = target.stem
+    suffix = target.suffix
+    index = 1
+    while True:
+        candidate = directory / f"{stem}_{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+        index += 1
+
+
+def _stash_previous_ebooks() -> list[Path]:
+    ebooks = _collect_previous_ebooks()
+    if not ebooks:
+        return []
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    stash_dir = PROJECT_ARCHIVE_DIR / timestamp
+    stash_dir.mkdir(parents=True, exist_ok=True)
+
+    moved: list[Path] = []
+    for ebook_path in ebooks:
+        target = _unique_target_path(stash_dir, ebook_path.name)
+        shutil.move(str(ebook_path), str(target))
+        moved.append(target)
+    return moved
+
+
 def _clear_project_output() -> None:
     """Remove generated project artifacts so a new run starts cleanly."""
     removed_files: list[str] = []
@@ -88,6 +174,8 @@ def _clear_project_output() -> None:
         "glossary.json",
         "book_analysis.txt",
         "book_glossary.txt",
+        "ai_usage_state.json",
+        "groq_usage_state.json",
         "checkpoint_*.json",
         "chapter_*.txt",
     ]
@@ -108,6 +196,22 @@ def _clear_project_output() -> None:
         print("Starting a fresh project.")
 
 
+def _prepare_fresh_start() -> None:
+    """Offer to archive old EPUBs, then clear cached project artifacts."""
+    previous_ebooks = _collect_previous_ebooks()
+    if previous_ebooks:
+        if _prompt_stash_previous_ebooks():
+            moved = _stash_previous_ebooks()
+            if moved:
+                print("Archived previous EPUBs:")
+                for path in moved:
+                    print(f"  - {path}")
+        else:
+            print("Leaving existing EPUBs in place.")
+
+    _clear_project_output()
+
+
 def run(provider: str) -> None:
     config_path = PROVIDER_CONFIG_MAP[provider]
     os.environ["AI_CONFIG_PATH"] = config_path
@@ -117,7 +221,9 @@ def run(provider: str) -> None:
         if _prompt_resume_existing_project():
             print("Resuming existing project.")
         else:
-            _clear_project_output()
+            _prepare_fresh_start()
+    elif _has_previous_generated_artifacts():
+        _prepare_fresh_start()
 
     creator = AIBookCreator()
     creator.create_book()

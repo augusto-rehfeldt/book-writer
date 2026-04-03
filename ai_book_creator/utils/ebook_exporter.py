@@ -43,7 +43,7 @@ def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathL
 
     title = _resolve_book_title(project_data, project_path, chapters)
     author = "AI Book Creator"
-    output_file = Path(output_path) if output_path else project_path / f"{_slugify(title)}.epub"
+    output_file = Path(output_path) if output_path else project_path / "ebook" / f"{_slugify(title)}.epub"
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     book_id = _slugify(title) or "ai-book-creator-book"
@@ -70,6 +70,7 @@ def export_epub(project_dir: str | os.PathLike[str], output_path: str | os.PathL
             images=images,
         )
 
+    _write_cover_prompt_file(output_file, project_data, title, chapters)
     return str(output_file)
 
 
@@ -118,6 +119,80 @@ def _resolve_book_title(project_data: dict[str, Any], project_path: Path, chapte
         return title_line.group(1).lstrip("# ").strip()[:120]
 
     return project_path.name.replace("_", " ").replace("-", " ").strip().title() or "Generated Book"
+
+
+def _write_cover_prompt_file(output_file: Path, project_data: dict[str, Any], title: str, chapters: list[EbookChapter]) -> str:
+    prompt_path = output_file.with_name(f"{output_file.stem}_cover_prompt.txt")
+    prompt = _build_cover_prompt(project_data, title, chapters)
+    prompt_path.write_text(prompt, encoding="utf-8")
+    return str(prompt_path)
+
+
+def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list[EbookChapter]) -> str:
+    init_data = project_data.get("init", {}) if isinstance(project_data.get("init", {}), dict) else {}
+    book_idea = str(init_data.get("book_idea", "")).strip()
+    layout_content = str(init_data.get("layout_content", "")).strip()
+    written = project_data.get("written", {}) if isinstance(project_data.get("written", {}), dict) else {}
+    reviewed = project_data.get("reviewed", {}) if isinstance(project_data.get("reviewed", {}), dict) else {}
+
+    chapter_titles = [chapter.title for chapter in chapters[:5] if chapter.title]
+    mood = _extract_cover_mood(layout_content) or "dramatic and cinematic"
+    genre = _extract_cover_genre(layout_content) or "literary fiction"
+    visual_keywords = _extract_cover_keywords(layout_content, book_idea, reviewed.get("analysis", ""))
+    if not visual_keywords and chapter_titles:
+        visual_keywords = chapter_titles[:3]
+
+    prompt_lines = [
+        f"Book cover prompt for: {title}",
+        f"Create a striking, professional book cover in a {mood} style for a {genre} novel.",
+        "Square composition, strong focal point, polished lighting, high-detail digital illustration.",
+    ]
+    if book_idea:
+        prompt_lines.append(f"Story premise: {book_idea}")
+    if visual_keywords:
+        prompt_lines.append(f"Include these visual elements: {', '.join(visual_keywords[:6])}.")
+    if chapter_titles:
+        prompt_lines.append(f"Key chapter or scene cues: {', '.join(chapter_titles[:5])}.")
+    if written.get("total_word_count"):
+        prompt_lines.append(f"Manuscript length: {int(written.get('total_word_count', 0)):,} words.")
+    prompt_lines.append("Do not add text overlays, watermarks, or logos.")
+
+    return "\n".join(prompt_lines).strip() + "\n"
+
+
+def _extract_cover_mood(layout_content: str) -> str:
+    mood_patterns = [
+        r"mood[:\s-]+([^\n;]{3,80})",
+        r"tone[:\s-]+([^\n;]{3,80})",
+        r"atmosphere[:\s-]+([^\n;]{3,80})",
+    ]
+    for pattern in mood_patterns:
+        match = re.search(pattern, layout_content, re.IGNORECASE)
+        if match:
+            return match.group(1).strip().rstrip(".")
+    return ""
+
+
+def _extract_cover_genre(layout_content: str) -> str:
+    match = re.search(r"genre[:\s-]+([^\n;]{3,80})", layout_content, re.IGNORECASE)
+    if match:
+        return match.group(1).strip().rstrip(".")
+    return ""
+
+
+def _extract_cover_keywords(*sources: str) -> list[str]:
+    keywords: list[str] = []
+    seen: set[str] = set()
+    for source in sources:
+        for match in re.findall(r"\b[A-Z][a-zA-Z]{3,}\b", source):
+            normalized = match.lower()
+            if normalized in seen:
+                continue
+            if normalized in {"chapter", "title", "genre", "setting", "theme"}:
+                continue
+            seen.add(normalized)
+            keywords.append(match)
+    return keywords
 
 
 def _extract_chapter_title(content: str) -> str:

@@ -58,10 +58,13 @@ class EbookStep(BaseStep):
 
         print("📦 Exporting EPUB ebook...")
         output_file = export_epub(self.output_dir)
+        prompt_file = os.path.splitext(output_file)[0] + "_cover_prompt.txt"
         print(f"✅ Ebook exported to: {output_file}")
+        print(f"📝 Cover prompt saved to: {prompt_file}")
 
         ebook_data = {
             "output_file": output_file,
+            "prompt_file": prompt_file,
             "source_chapter_count": len(chapters),
             "source_written_word_count": int(written_data.get("total_word_count", 0)),
             "source_reviewed_word_count": int(reviewed_data.get("total_word_count", 0)),
@@ -81,4 +84,6 @@ class EbookStep(BaseStep):
             int(existing.get("source_chapter_count", 0)) == len(chapters)
             and int(existing.get("source_written_word_count", 0)) == int(written_data.get("total_word_count", 0))
             and int(existing.get("source_reviewed_word_count", 0)) == int(reviewed_data.get("total_word_count", 0))
+            and bool(existing.get("prompt_file", ""))
+            and os.path.exists(existing.get("prompt_file", ""))
         )

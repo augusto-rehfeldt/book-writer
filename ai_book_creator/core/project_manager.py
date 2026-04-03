@@ -270,6 +270,7 @@ class ProjectManager:
 
         if step_name == "ebook":
             output_file = step_data.get("output_file", "")
+            prompt_file = step_data.get("prompt_file", "")
             written_data = self.get_step_data("written")
             reviewed_data = self.get_step_data("reviewed")
             written_chapters = written_data.get("chapters", {})
@@ -279,6 +280,8 @@ class ProjectManager:
             return (
                 bool(output_file)
                 and os.path.exists(output_file)
+                and bool(prompt_file)
+                and os.path.exists(prompt_file)
                 and self._is_step_valid("written")
                 and self._is_step_valid("reviewed")
                 and int(step_data.get("source_chapter_count", 0)) == source_chapter_count
