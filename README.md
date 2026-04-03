@@ -115,7 +115,9 @@ The system automatically detects and resumes existing projects. All progress is 
 ## Step-by-Step Process
 
 ### Step 0: Initialization
+- Choose whether you want a single book or a series
 - Collect the book idea and any high-level constraints
+- Generate a series layout when needed and show an estimated token budget
 - Establish the starting project state and output folder
 
 ### Step 1: Structure

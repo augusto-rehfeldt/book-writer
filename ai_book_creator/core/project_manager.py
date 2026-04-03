@@ -243,7 +243,16 @@ class ProjectManager:
             return False
 
         if step_name == "init":
-            return bool(step_data.get("book_idea")) and bool(step_data.get("layout_content"))
+            if not bool(step_data.get("book_idea")) or not bool(step_data.get("layout_content")):
+                return False
+
+            if step_data.get("series_mode") or step_data.get("scope_type") == "series":
+                if int(step_data.get("series_book_count", 0)) < 2:
+                    return False
+                if not bool(step_data.get("series_layout_content")):
+                    return False
+
+            return True
 
         if step_name == "structure":
             chapter_plots = step_data.get("chapter_plots", {})

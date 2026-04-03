@@ -109,8 +109,8 @@ class AIService:
 
         self.provider = self.config.get("provider", "openai").lower()
         self.api_key = self._resolve_api_key()
-        self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "gpt-5-mini"))
-        self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "gpt-5"))
+        self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "gpt-5.4-mini"))
+        self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "gpt-5.4"))
         self.openai_big_models = {
             str(model).strip().lower()
             for model in self.config.get("openai_big_models", list(self.OPENAI_BIG_MODELS))

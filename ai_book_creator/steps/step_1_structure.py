@@ -92,6 +92,8 @@ class StructureStep(BaseStep):
         is_groq = getattr(self.ai_service, "provider", "") == "groq"
         book_idea = self._truncate_text(init_data.get("book_idea", ""), 350 if is_groq else 500)
         layout_content = self._truncate_text(init_data.get("layout_content", ""), 1400 if is_groq else 3500)
+        series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900 if is_groq else 1800)
+        series_mode = bool(init_data.get("series_mode"))
         opening_style_list = (
             "in medias res, dialogue-led, sensory close-up, object-focused, institutional briefing, "
             "procedural action, quiet reflection, cross-cut, suspense hook"
@@ -100,12 +102,17 @@ class StructureStep(BaseStep):
         if is_groq:
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
-                    "Create a compact chapter outline as a markdown table. "
+                    "Create a compact chapter outline as a markdown table for the current book. "
                     "Return ONLY the table, with no extra commentary."
                 ),
                 sections=[
                     ("Book idea", book_idea),
                     ("Layout summary", layout_content),
+                    *(
+                        [("Series layout", series_layout)]
+                        if series_mode and series_layout
+                        else []
+                    ),
                     (
                         "Output rules",
                         "Use exactly 5 columns: #, Title, Summary, Key events, Word count. "
@@ -121,6 +128,7 @@ class StructureStep(BaseStep):
                 section_token_caps={
                     "Book idea": 180,
                     "Layout summary": 700,
+                    "Series layout": 450,
                     "Output rules": 260,
                 },
             )
@@ -128,12 +136,17 @@ class StructureStep(BaseStep):
 
         prompt = self.ai_service.build_sectioned_prompt(
             instruction=(
-                "Create chapter structure from the provided context. "
+                "Create chapter structure from the provided context for the current book. "
                 "Generate 20-30 chapters and return ONLY a plain numbered list."
             ),
             sections=[
                 ("Book idea", book_idea),
                 ("Layout summary", layout_content),
+                *(
+                    [("Series layout", series_layout)]
+                    if series_mode and series_layout
+                    else []
+                ),
                 (
                     "Output rules",
                     "Each chapter must be on its own line in the form: '1. Chapter 1 - Four Powers, One Sky: Opening style tag: dialogue-led. "
@@ -151,6 +164,7 @@ class StructureStep(BaseStep):
             section_token_caps={
                 "Book idea": 250,
                 "Layout summary": 2500,
+                "Series layout": 1200,
                 "Output rules": 450,
             },
         )
@@ -347,6 +361,7 @@ class StructureStep(BaseStep):
     
     def _create_plots(self, chapters: List[Dict], init_data: Dict) -> Dict:
         chapter_plots = dict(self.get_step_data().get("chapter_plots", {}))
+        series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900)
         self.save_step_data({
             "structure_content": self.get_step_data().get("structure_content", ""),
             "chapter_plots": chapter_plots,
@@ -374,6 +389,11 @@ class StructureStep(BaseStep):
                 ),
                 sections=[
                     ("Book summary", init_data["book_idea"][:500]),
+                    *(
+                        [("Series layout", series_layout)]
+                        if series_layout
+                        else []
+                    ),
                     ("Chapter summary", chapter.get("content", "")),
                     ("Opening style tag", chapter.get("opening_style", "")),
                     ("Requirements", "Opening scene; 3-5 key events; character interactions; conflict/tension; chapter ending/transition; emotional beats."),
@@ -382,6 +402,7 @@ class StructureStep(BaseStep):
                 max_prompt_tokens=7000,
                 section_token_caps={
                     "Book summary": 200,
+                    "Series layout": 500,
                     "Chapter summary": 1000,
                     "Opening style tag": 60,
                     "Requirements": 250,

@@ -188,12 +188,15 @@ class AIBookCreator:
     
     def _print_completion_summary(self):
         """Print the final completion summary"""
+        init_data = self.project_manager.book_data.get("init", {})
         written_data = self.project_manager.book_data.get("written", {})
         
         print("\n" + "=" * 60)
         print("🎉 BOOK CREATION COMPLETED!")
         print("=" * 60)
         print(f"📁 Output directory: {self.output_dir}")
+        if init_data.get("series_mode"):
+            print(f"📚 Series size: {int(init_data.get('series_book_count', 0))} books")
         print(f"📖 Total chapters: {len(written_data.get('chapters', {}))}")
         print(f"📊 Total words: {written_data.get('total_word_count', 0):,}")
         print(f"📄 Estimated pages: {written_data.get('total_pages', 0)}")
@@ -217,6 +220,8 @@ class AIBookCreator:
         print("=" * 60)
         print(f"Target: {min_book_pages} pages")
         print(f"Actual: {total_pages} pages")
+        if init_data.get("series_mode"):
+            print(f"Series books: {int(init_data.get('series_book_count', 0))}")
 
         if total_pages < min_book_pages:
             print(f"⚠️ Book is shorter than target")

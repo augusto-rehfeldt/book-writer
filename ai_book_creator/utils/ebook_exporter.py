@@ -132,6 +132,7 @@ def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list
     init_data = project_data.get("init", {}) if isinstance(project_data.get("init", {}), dict) else {}
     book_idea = str(init_data.get("book_idea", "")).strip()
     layout_content = str(init_data.get("layout_content", "")).strip()
+    series_layout_content = str(init_data.get("series_layout_content", "")).strip()
     written = project_data.get("written", {}) if isinstance(project_data.get("written", {}), dict) else {}
     reviewed = project_data.get("reviewed", {}) if isinstance(project_data.get("reviewed", {}), dict) else {}
 
@@ -149,6 +150,8 @@ def _build_cover_prompt(project_data: dict[str, Any], title: str, chapters: list
     ]
     if book_idea:
         prompt_lines.append(f"Story premise: {book_idea}")
+    if series_layout_content:
+        prompt_lines.append(f"Series context: {series_layout_content[:900]}")
     if visual_keywords:
         prompt_lines.append(f"Include these visual elements: {', '.join(visual_keywords[:6])}.")
     if chapter_titles:

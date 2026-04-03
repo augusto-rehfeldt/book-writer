@@ -282,6 +282,7 @@ class ReviewStep(BaseStep):
         estimated_pages = max(requested_additional_words / self.words_per_page, 0)
         book_idea = self._truncate_text(init_data.get("book_idea", ""), 500)
         layout_content = self._truncate_text(init_data.get("layout_content", ""), 3000)
+        series_layout_content = self._truncate_text(init_data.get("series_layout_content", ""), 1200)
         plot_outline = self._truncate_text(chapter_plot.get("plot_outline", "No outline provided."), 3000)
         chapter_content = self._truncate_text(chapter.content, 7000)
         prompt = self.ai_service.build_sectioned_prompt(
@@ -293,6 +294,11 @@ class ReviewStep(BaseStep):
             sections=[
                 ("Book concept", book_idea),
                 ("Book layout", layout_content),
+                *(
+                    [("Series layout", series_layout_content)]
+                    if series_layout_content
+                    else []
+                ),
                 ("Chapter title", chapter.title),
                 ("Chapter number", str(chapter.chapter_number)),
                 ("Chapter plot outline", plot_outline),
@@ -308,6 +314,7 @@ class ReviewStep(BaseStep):
             section_token_caps={
                 "Book concept": 200,
                 "Book layout": 1800,
+                "Series layout": 700,
                 "Chapter title": 50,
                 "Chapter number": 20,
                 "Chapter plot outline": 1200,
@@ -325,12 +332,18 @@ class ReviewStep(BaseStep):
     def _generate_analysis(self, init_data: Dict, full_text: str) -> str:
         book_idea = self._truncate_text(init_data.get("book_idea", ""), 500)
         layout_content = self._truncate_text(init_data.get("layout_content", ""), 3000)
+        series_layout_content = self._truncate_text(init_data.get("series_layout_content", ""), 1200)
         text_excerpt = self._truncate_text(full_text, 12000)
         prompt = self.ai_service.build_sectioned_prompt(
             instruction="Analyze this book and be constructive and concise.",
             sections=[
                 ("Concept", book_idea),
                 ("Layout", layout_content),
+                *(
+                    [("Series layout", series_layout_content)]
+                    if series_layout_content
+                    else []
+                ),
                 ("Text excerpt", text_excerpt),
                 (
                     "Requested output",
@@ -344,6 +357,7 @@ class ReviewStep(BaseStep):
             section_token_caps={
                 "Concept": 200,
                 "Layout": 1200,
+                "Series layout": 700,
                 "Text excerpt": 5000,
                 "Requested output": 250,
             },

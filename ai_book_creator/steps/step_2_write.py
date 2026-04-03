@@ -84,7 +84,12 @@ class WriteStep(BaseStep):
             if self.glossary_manager:
                 glossary_context = self.glossary_manager.get_context_for_writing()
             
-            prompt = self._build_chapter_prompt(chapter_data, glossary_context, min_words)
+            prompt = self._build_chapter_prompt(
+                chapter_data,
+                glossary_context,
+                min_words,
+                init_data.get("series_layout_content", ""),
+            )
             
             text = self.ai_service.generate_content(
                 prompt,
@@ -156,13 +161,29 @@ class WriteStep(BaseStep):
         self.mark_completed()
         return written_data
 
-    def _build_chapter_prompt(self, chapter_data: Dict[str, Any], glossary_context: str, min_words: int) -> str:
+    def _build_chapter_prompt(
+        self,
+        chapter_data: Dict[str, Any],
+        glossary_context: str,
+        min_words: int,
+        series_layout: str = "",
+    ) -> str:
         opening_style = chapter_data.get("opening_style", "").strip() or "varied"
+        series_section = ""
+        if series_layout.strip():
+            series_section = f"""
+
+SERIES LAYOUT:
+{series_layout.strip()}
+"""
+
         return f"""Write complete chapter text:
 
 CHAPTER: {chapter_data['title']}
 OPENING STYLE TAG: {opening_style}
 PLOT OUTLINE: {chapter_data['plot_outline']}
+
+{series_section}
 
 {glossary_context}
 
