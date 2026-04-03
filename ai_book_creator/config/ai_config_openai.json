@@ -1,8 +1,8 @@
 {
   "provider": "openai",
   "use_openai_client": true,
-  "writing_model": "gpt-5.4",
-  "review_model": "gpt-5.4",
+  "writing_model": "gpt-5.4-mini",
+  "review_model": "gpt-5.4-mini",
   "openai_big_models": [
     "gpt-5.4"
   ],

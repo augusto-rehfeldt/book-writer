@@ -27,25 +27,61 @@ PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
 PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
+OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
 
 
-def _load_last_provider(default_provider: str = "google") -> str:
+def _load_provider_state() -> dict:
     try:
         if PROVIDER_STATE_FILE.exists():
             with PROVIDER_STATE_FILE.open("r", encoding="utf-8") as f:
                 data = json.load(f)
-            provider = str(data.get("provider", "")).lower()
-            if provider in PROVIDER_CONFIG_MAP:
-                return provider
+            if isinstance(data, dict):
+                return data
     except Exception:
         pass
+    return {}
+
+
+def _load_last_provider(default_provider: str = "google") -> str:
+    data = _load_provider_state()
+    provider = str(data.get("provider", "")).lower()
+    if provider in PROVIDER_CONFIG_MAP:
+        return provider
     return default_provider
 
 
-def _save_last_provider(provider: str) -> None:
+def _default_openai_model() -> str:
+    try:
+        with open(PROVIDER_CONFIG_MAP["openai"], "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            candidate = str(data.get("writing_model") or data.get("review_model") or "").lower()
+            if candidate in OPENAI_MODEL_OPTIONS:
+                return candidate
+    except Exception:
+        pass
+    return "gpt-5.4-mini"
+
+
+def _load_last_openai_model(default_model: str | None = None) -> str:
+    data = _load_provider_state()
+    model = str(data.get("openai_model", "")).lower()
+    if model in OPENAI_MODEL_OPTIONS:
+        return model
+    return default_model or _default_openai_model()
+
+
+def _save_last_provider(provider: str, openai_model: str | None = None) -> None:
+    data = _load_provider_state()
+    data["provider"] = provider.lower()
+    if openai_model is not None:
+        data["openai_model"] = openai_model.lower()
+    elif provider.lower() == "openai" and str(data.get("openai_model", "")).lower() not in OPENAI_MODEL_OPTIONS:
+        data["openai_model"] = _default_openai_model()
+
     PROVIDER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with PROVIDER_STATE_FILE.open("w", encoding="utf-8") as f:
-        json.dump({"provider": provider.lower()}, f, indent=2)
+        json.dump(data, f, indent=2)
 
 
 def _prompt_provider(default_provider: str) -> str:
@@ -65,6 +101,40 @@ def _prompt_provider(default_provider: str) -> str:
         if choice in PROVIDER_CONFIG_MAP:
             return choice
         print(f"Invalid provider. Please choose one of: {', '.join(valid_providers)}")
+
+
+def _normalize_openai_model(choice: str) -> str:
+    normalized = choice.strip().lower()
+    aliases = {
+        "1": "gpt-5.4",
+        "gpt-5.4": "gpt-5.4",
+        "5.4": "gpt-5.4",
+        "2": "gpt-5.4-mini",
+        "gpt-5.4-mini": "gpt-5.4-mini",
+        "mini": "gpt-5.4-mini",
+    }
+    return aliases.get(normalized, "")
+
+
+def _prompt_openai_model(default_model: str) -> str:
+    prompt = (
+        f"Choose OpenAI model [default: {default_model}] "
+        "(1) gpt-5.4, (2) gpt-5.4-mini: "
+    )
+
+    while True:
+        try:
+            choice = input(prompt).strip()
+        except EOFError:
+            return default_model
+
+        if not choice:
+            return default_model
+
+        model = _normalize_openai_model(choice)
+        if model in OPENAI_MODEL_OPTIONS:
+            return model
+        print("Please choose 1 for gpt-5.4 or 2 for gpt-5.4-mini.")
 
 
 def _prompt_resume_existing_project() -> bool:
@@ -215,7 +285,16 @@ def _prepare_fresh_start() -> None:
 def run(provider: str) -> None:
     config_path = PROVIDER_CONFIG_MAP[provider]
     os.environ["AI_CONFIG_PATH"] = config_path
-    _save_last_provider(provider)
+
+    openai_model = None
+    if provider == "openai":
+        default_model = _load_last_openai_model()
+        openai_model = _prompt_openai_model(default_model)
+        os.environ["AI_WRITING_MODEL"] = openai_model
+        os.environ["AI_REVIEW_MODEL"] = openai_model
+        os.environ["AI_OPENAI_MODEL"] = openai_model
+
+    _save_last_provider(provider, openai_model)
 
     if PROJECT_STATE_FILE.exists():
         if _prompt_resume_existing_project():
