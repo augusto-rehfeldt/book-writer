@@ -5,6 +5,7 @@ Step 0: Initialize Book - Concept, scope, layout, and character setup
 from datetime import datetime
 from typing import Dict, Any
 import math
+import re
 
 from .base_step import BaseStep
 from ..utils.text_utils import pages_to_words
@@ -70,6 +71,10 @@ class InitStep(BaseStep):
         # Generate layout
         layout_content = self._generate_layout(book_idea, page_count, series_layout_content)
         
+        # Extract the first book title from the layout (used for duplicate prevention in series)
+        first_title = self._extract_first_title(layout_content)
+        book_titles = [first_title] if first_title else []
+        
         init_data = {
             "book_idea": book_idea,
             "scope_type": scope_type,
@@ -78,6 +83,7 @@ class InitStep(BaseStep):
             "target_word_count": target_word_count,
             "page_count": page_count,
             "layout_content": layout_content,
+            "book_titles": book_titles,          # store for series duplicate avoidance
             "timestamp": datetime.now().isoformat()
         }
 
@@ -223,6 +229,23 @@ class InitStep(BaseStep):
         print("-" * 50)
         
         return layout
+
+    def _extract_first_title(self, layout_content: str) -> str:
+        """Extract the first plausible book title from the layout text."""
+        # Look for numbered titles like "1. The Great Adventure"
+        match = re.search(r'(?m)^\s*1\.\s*(.+?)(?:\n|$)', layout_content)
+        if match:
+            return match.group(1).strip()
+        # Look for "Title: ..." pattern
+        match = re.search(r'(?i)title[:\s]+(.+?)(?:\n|$)', layout_content)
+        if match:
+            return match.group(1).strip()
+        # Fallback: first line that looks like a title (capitalized, not too long)
+        for line in layout_content.splitlines():
+            line = line.strip()
+            if line and not line.startswith(('•', '-', '*')) and len(line) < 80 and line[0].isupper():
+                return line
+        return ""
 
     def _estimate_chapter_count(self, target_word_count: int) -> int:
         return max(20, min(30, math.ceil(max(1, target_word_count) / 1500)))

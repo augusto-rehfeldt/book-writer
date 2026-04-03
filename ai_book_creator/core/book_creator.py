@@ -7,6 +7,7 @@ import json
 import sys
 import shutil
 import glob
+import re
 
 from .project_manager import ProjectManager
 from .project_manager import BrokenProjectStateError
@@ -187,6 +188,32 @@ class AIBookCreator:
                 print("📁 Progress saved despite error. You can try to resume later.")
                 break
 
+    def _extract_titles_from_layout(self, layout: str) -> list[str]:
+        """Extract up to three potential book titles from the layout text."""
+        titles = []
+        # Look for numbered list like "1. Title"
+        matches = re.findall(r'(?m)^\s*\d+\.\s*(.+?)(?:\n|$)', layout)
+        titles.extend(matches[:3])
+        if len(titles) < 3:
+            # Look for "Title: ..." pattern
+            matches2 = re.findall(r'(?i)title[:\s]+(.+?)(?:\n|$)', layout)
+            titles.extend(matches2[:3 - len(titles)])
+        if not titles:
+            # Fallback: any line that looks like a title
+            for line in layout.splitlines():
+                line = line.strip()
+                if line and len(line) < 80 and line[0].isupper() and not line.startswith(('•', '-', '*', '#')):
+                    titles.append(line)
+                    if len(titles) >= 3:
+                        break
+        # Clean and deduplicate
+        cleaned = []
+        for t in titles:
+            t = t.strip()
+            if t and t not in cleaned:
+                cleaned.append(t)
+        return cleaned
+
     def _advance_to_next_book(self, current_book: int):
         """Archives the finished book's files and prompts the AI for the next book layout."""
         print("\n" + "=" * 60)
@@ -217,6 +244,10 @@ class AIBookCreator:
         book_idea = init_data.get("book_idea", "")
         page_count = init_data.get("page_count", 300)
         
+        # Get list of already used book titles (to avoid repetition)
+        used_titles = init_data.get("book_titles", [])
+        used_titles_str = ", ".join(f'"{t}"' for t in used_titles) if used_titles else "none"
+        
         reviewed_data = self.project_manager.get_step_data("reviewed")
         previous_analysis = reviewed_data.get("analysis", "")
         
@@ -227,32 +258,70 @@ class AIBookCreator:
 
         print(f"\n🔄 Generating layout for Book {current_book + 1}...")
         
-        prompt = self.ai_service.build_sectioned_prompt(
-            instruction=(
-                f"Create a book layout for Book {current_book + 1} of the series. "
-                f"Target {page_count} pages. Build upon the series layout and ensure the story advances appropriately. "
-                "Incorporate developments from the previous books. Be concise but complete."
-            ),
-            sections=[
-                ("Overall Series Idea", book_idea),
-                ("Series Layout", series_layout),
-                ("Previous Books Context", previous_summaries if previous_summaries else "Follow the series layout progression."),
-                (
-                    "Required output",
-                    f"3 potential titles for Book {current_book + 1}; genre; target audience; 3-5 main themes for this book; setting overview; "
-                    f"three-act structure for Book {current_book + 1}; 5-7 main characters with name, role, and brief description."
-                )
-            ],
-            max_prompt_tokens=4000,
-            section_token_caps={
-                "Overall Series Idea": 300,
-                "Series Layout": 1500,
-                "Previous Books Context": 1500,
-                "Required output": 250,
-            }
-        )
+        # Prompt with duplicate prevention
+        max_retries = 3
+        for attempt in range(max_retries):
+            # Build prompt with used titles information
+            duplicate_warning = ""
+            if used_titles:
+                duplicate_warning = f"\nIMPORTANT: The following book titles have already been used in this series: {used_titles_str}. Do NOT repeat any of these titles. Generate completely new, distinct titles for Book {current_book + 1}."
+            else:
+                duplicate_warning = f"\nGenerate fresh, original titles for Book {current_book + 1}."
+            
+            prompt = self.ai_service.build_sectioned_prompt(
+                instruction=(
+                    f"Create a book layout for Book {current_book + 1} of the series. "
+                    f"Target {page_count} pages. Build upon the series layout and ensure the story advances appropriately. "
+                    "Incorporate developments from the previous books. Be concise but complete."
+                    f"{duplicate_warning}"
+                ),
+                sections=[
+                    ("Overall Series Idea", book_idea),
+                    ("Series Layout", series_layout),
+                    ("Previous Books Context", previous_summaries if previous_summaries else "Follow the series layout progression."),
+                    (
+                        "Required output",
+                        f"3 potential titles for Book {current_book + 1}; genre; target audience; 3-5 main themes for this book; setting overview; "
+                        f"three-act structure for Book {current_book + 1}; 5-7 main characters with name, role, and brief description."
+                    )
+                ],
+                max_prompt_tokens=4000,
+                section_token_caps={
+                    "Overall Series Idea": 300,
+                    "Series Layout": 1500,
+                    "Previous Books Context": 1500,
+                    "Required output": 250,
+                }
+            )
+            
+            new_layout = self.ai_service.generate_content(prompt, max_completion_tokens=1500)
+            
+            # Extract titles from the layout
+            candidate_titles = self._extract_titles_from_layout(new_layout)
+            if not candidate_titles:
+                print("⚠️ Could not extract any titles from the generated layout. Will accept layout as is.")
+                chosen_title = None
+                break
+            
+            # Check for duplicates
+            duplicate_found = any(title in used_titles for title in candidate_titles)
+            if not duplicate_found:
+                chosen_title = candidate_titles[0] if candidate_titles else None
+                break
+            else:
+                print(f"⚠️ Attempt {attempt+1}: Generated titles conflict with existing series titles. Retrying...")
+                if attempt == max_retries - 1:
+                    print("Max retries reached. Accepting layout but will append a number to the duplicate title.")
+                    # Modify the duplicate title by appending a number
+                    for i, title in enumerate(candidate_titles):
+                        if title in used_titles:
+                            candidate_titles[i] = f"{title} (Book {current_book + 1})"
+                    chosen_title = candidate_titles[0]
         
-        new_layout = self.ai_service.generate_content(prompt, max_completion_tokens=1500)
+        # Add the chosen title to the used list
+        if chosen_title:
+            used_titles.append(chosen_title)
+            init_data["book_titles"] = used_titles
         
         print(f"\n📋 BOOK {current_book + 1} LAYOUT:")
         print("-" * 50)
