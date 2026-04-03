@@ -32,7 +32,7 @@ class EbookStepTests(unittest.TestCase):
                         "chapter_1": {
                             "title": "Opening",
                             "chapter_number": 1,
-                            "filename": chapter_file.name,
+                            "filename": str(Path("book_output") / chapter_file.name),
                             "word_count": 8,
                         }
                     },

@@ -32,13 +32,13 @@ class EbookExporterTests(unittest.TestCase):
                         "chapter_1": {
                             "title": "Opening",
                             "chapter_number": 1,
-                            "filename": str(chapter_1.relative_to(project_dir)),
+                            "filename": str(Path("book_output") / chapter_1.name),
                             "word_count": 4,
                         },
                         "chapter_2": {
                             "title": "Follow-Up",
                             "chapter_number": 2,
-                            "filename": str(chapter_2.relative_to(project_dir)),
+                            "filename": str(Path("book_output") / chapter_2.name),
                             "word_count": 4,
                         },
                     },
@@ -109,7 +109,7 @@ class EbookExporterTests(unittest.TestCase):
                         "chapter_1": {
                             "title": "Markdown Test",
                             "chapter_number": 1,
-                            "filename": str(chapter.relative_to(project_dir)),
+                            "filename": str(Path("book_output") / chapter.name),
                             "word_count": 20,
                         }
                     },

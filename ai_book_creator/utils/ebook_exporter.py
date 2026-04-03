@@ -93,8 +93,8 @@ def _load_chapters(project_path: Path, project_data: dict[str, Any]) -> list[Ebo
         filename = info.get("filename")
         if not filename:
             continue
-        chapter_path = project_path / filename
-        if not chapter_path.exists():
+        chapter_path = _resolve_project_file(project_path, str(filename))
+        if chapter_path is None:
             continue
 
         content = chapter_path.read_text(encoding="utf-8")
@@ -439,6 +439,38 @@ def _resolve_markdown_path(base_dir: Path, target: str) -> Path | None:
         return target_path if target_path.exists() else None
     resolved = (base_dir / target_path).resolve()
     return resolved if resolved.exists() else None
+
+
+def _resolve_project_file(project_path: Path, stored_path: str) -> Path | None:
+    """Resolve a chapter or asset path stored in project data.
+
+    Historical projects may store chapter filenames as:
+    - absolute paths
+    - paths relative to the repository root
+    - paths relative to the project directory
+    """
+    candidates = []
+    if not Path(stored_path).is_absolute():
+        candidates.append(project_path / stored_path)
+        candidates.append(project_path.parent / stored_path)
+
+        project_name_prefix = f"{project_path.name}{os.sep}"
+        if stored_path.startswith(project_name_prefix):
+            candidates.append(Path(stored_path[len(project_name_prefix):]))
+    candidates.append(Path(stored_path))
+
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            normalized = candidate.resolve()
+        except Exception:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        if normalized.exists():
+            return normalized
+    return None
 
 
 def _collect_image_assets(chapters: Iterable[EbookChapter], project_path: Path) -> list[EbookImage]:
