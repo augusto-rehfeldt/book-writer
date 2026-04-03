@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.pyc
 tests/
+benchmarks/
 
 # Local/OS files
 .DS_Store

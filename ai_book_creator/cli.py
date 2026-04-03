@@ -193,8 +193,6 @@ def _has_previous_generated_artifacts() -> bool:
         "glossary.json",
         "book_analysis.txt",
         "book_glossary.txt",
-        "ai_usage_state.json",
-        "groq_usage_state.json",
         "checkpoint_*.json",
         "chapter_*.txt",
     ]
@@ -244,8 +242,6 @@ def _clear_project_output() -> None:
         "glossary.json",
         "book_analysis.txt",
         "book_glossary.txt",
-        "ai_usage_state.json",
-        "groq_usage_state.json",
         "checkpoint_*.json",
         "chapter_*.txt",
     ]
