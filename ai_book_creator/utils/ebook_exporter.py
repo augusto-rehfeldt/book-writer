@@ -1,3 +1,4 @@
+# ai_book_creator/utils/ebook_exporter.py
 """
 EPUB export helpers for generated chapter files.
 """
@@ -64,6 +65,18 @@ def export_epub(
     language = "en"
     created_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
+    # --- Extract series metadata ---
+    init_data = project_data.get("init", {})
+    series_mode = init_data.get("series_mode", False)
+    series_title = None
+    series_position = None
+    if series_mode:
+        series_title = _extract_series_title(
+            init_data.get("series_layout_content", ""),
+            init_data.get("book_idea", "")
+        )
+        series_position = init_data.get("current_book", 1)
+
     with zipfile.ZipFile(output_file, "w") as epub:
         _write_mimetype(epub)
         _write_container(epub)
@@ -82,6 +95,8 @@ def export_epub(
             created_at=created_at,
             chapters=chapters,
             images=images,
+            series_title=series_title,
+            series_position=series_position,
         )
 
     _write_cover_prompt_file(output_file, project_data, title, chapters)
@@ -145,6 +160,30 @@ def _resolve_book_title(project_data: dict[str, Any], project_path: Path, chapte
         return title_line.group(1).lstrip("# ").strip()[:120]
 
     return project_path.name.replace("_", " ").replace("-", " ").strip().title() or "Generated Book"
+
+
+def _extract_series_title(series_layout_content: str, fallback: str) -> str:
+    """Extract a readable series title from the series layout content."""
+    if not series_layout_content:
+        return fallback
+
+    # Try to find "Series title:" or similar patterns
+    match = re.search(r"(?i)series\s+title[:\s-]+([^\n]{3,120})", series_layout_content)
+    if match:
+        return match.group(1).strip()
+
+    # Look for a heading like "## Series Title" or bold text at the beginning
+    match = re.search(r"(?:^|\n)(?:#{1,3}\s+)?\*\*([^*]{3,80})\*\*", series_layout_content)
+    if match:
+        return match.group(1).strip()
+
+    # Fallback to first non-empty line that is not a list item or code block
+    for line in series_layout_content.splitlines():
+        line = line.strip()
+        if line and not line.startswith(('-', '*', '#')) and len(line) < 100:
+            return line
+
+    return fallback
 
 
 def _write_cover_prompt_file(output_file: Path, project_data: dict[str, Any], title: str, chapters: list[EbookChapter]) -> str:
@@ -685,6 +724,8 @@ def _write_content_opf(
     created_at: str,
     chapters: Iterable[EbookChapter],
     images: Iterable[EbookImage],
+    series_title: str | None = None,
+    series_position: int | None = None,
 ) -> None:
     manifest_items = [
         '<item id="nav" href="nav.xhtml" media-type="application/xhtml+xml" properties="nav"/>',
@@ -709,15 +750,27 @@ def _write_content_opf(
             f'<item id="{item_id}" href="{image.epub_path}" media-type="{image.media_type}"/>'
         )
 
+    # Build metadata section
+    metadata_parts = [
+        f'<dc:identifier id="book-id">{xml_escape(book_id)}</dc:identifier>',
+        f'<dc:title>{xml_escape(title)}</dc:title>',
+        f'<dc:language>{xml_escape(language)}</dc:language>',
+        f'<dc:creator>{xml_escape(author)}</dc:creator>',
+        f'<dc:description>{xml_escape(description)}</dc:description>',
+        f'<meta property="dcterms:modified">{xml_escape(created_at)}</meta>',
+    ]
+
+    if series_title:
+        metadata_parts.append(f'<meta property="belongs-to-series">{xml_escape(series_title)}</meta>')
+    if series_position is not None:
+        metadata_parts.append(f'<meta property="group-position">{xml_escape(str(series_position))}</meta>')
+
+    metadata_block = "\n    ".join(metadata_parts)
+
     opf = f"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="book-id" xml:lang="{xml_escape(language)}">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
-    <dc:identifier id="book-id">{xml_escape(book_id)}</dc:identifier>
-    <dc:title>{xml_escape(title)}</dc:title>
-    <dc:language>{xml_escape(language)}</dc:language>
-    <dc:creator>{xml_escape(author)}</dc:creator>
-    <dc:description>{xml_escape(description)}</dc:description>
-    <meta property="dcterms:modified">{xml_escape(created_at)}</meta>
+    {metadata_block}
   </metadata>
   <manifest>
     {' '.join(manifest_items)}
