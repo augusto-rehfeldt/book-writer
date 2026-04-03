@@ -136,8 +136,9 @@ class StructureStep(BaseStep):
                 ("Layout summary", layout_content),
                 (
                     "Output rules",
-                    "Each chapter must be on its own line in the form: '1. Chapter 1 - Title: Opening style tag: dialogue-led. "
+                    "Each chapter must be on its own line in the form: '1. Chapter 1 - Four Powers, One Sky: Opening style tag: dialogue-led. "
                     "Summary...' "
+                    "Do not include the literal word 'Title:' before the chapter title. "
                     "Do not use a table, bullets, headings, or Markdown formatting. "
                     "For every chapter, include an opening style tag chosen from: "
                     f"{opening_style_list}. "
@@ -222,28 +223,25 @@ class StructureStep(BaseStep):
     def _parse_numbered_outline(self, text: str) -> tuple[str, str, str, int, str]:
         """Parse a numbered chapter line that may contain title, summary, and word count."""
         cleaned = re.sub(r"\*\*", "", text).strip()
-        cleaned, opening_style = self._extract_opening_style(cleaned)
         word_count_estimate = 1500
-        key_events = ""
-
         word_count_match = re.search(
-            r"(?:word count(?: estimate)?|words?)\s*:\s*([\d,]+(?:\s*-\s*[\d,]+)?)",
+            r"(?:word count(?: estimate)?|words?)\s*:\s*([\d,]+(?:\s*-\s*[\d,]+)?)(?:\s*words?)?",
             cleaned,
             re.IGNORECASE,
         )
         if word_count_match:
             word_count_estimate = self._clean_word_count(word_count_match.group(1))
-            cleaned = cleaned[:word_count_match.start()].rstrip(" ,;:-")
+            cleaned = (cleaned[:word_count_match.start()] + cleaned[word_count_match.end():]).strip(" ,;:-")
 
-        key_events_match = re.search(r"\bkey events?\s*:\s*(.+)$", cleaned, re.IGNORECASE)
-        if key_events_match:
-            key_events = key_events_match.group(1).strip()
-            cleaned = cleaned[:key_events_match.start()].rstrip(" ,;:-")
+        cleaned = re.sub(r"^\s*Chapter\s*\d+\s*[—–-]\s*", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"^\s*Title\s*:\s*", "", cleaned, flags=re.IGNORECASE)
+        title, remainder = self._split_title_and_remainder(cleaned)
+        remainder, opening_style = self._extract_opening_style(remainder)
+        summary, remainder = self._extract_labeled_section(remainder, "summary")
+        key_events, remainder = self._extract_labeled_section(remainder, "key events")
 
-        if ":" in cleaned:
-            title, summary = cleaned.split(":", 1)
-        else:
-            title, summary = cleaned, ""
+        if not summary and remainder:
+            summary = remainder.strip().strip(" ,;:-")
 
         return (
             self._clean_title_cell(title),
@@ -252,6 +250,39 @@ class StructureStep(BaseStep):
             word_count_estimate,
             opening_style,
         )
+
+    def _split_title_and_remainder(self, text: str) -> tuple[str, str]:
+        """Split a numbered outline entry into title and the remaining descriptive text."""
+        primary_label_match = re.search(
+            r"\b(?:opening style tag|summary|key events?)\s*:",
+            text,
+            re.IGNORECASE,
+        )
+        if primary_label_match:
+            title = text[: primary_label_match.start()].strip(" ,;:-.")
+            remainder = text[primary_label_match.start():].strip()
+            return title, remainder
+
+        if ":" in text:
+            title, remainder = text.split(":", 1)
+            return title.strip(" ,;:-."), remainder.strip()
+
+        return text.strip(" ,;:-."), ""
+
+    def _extract_labeled_section(self, text: str, label: str) -> tuple[str, str]:
+        """Extract a labeled section from outline text and return the remaining text."""
+        pattern = re.compile(
+            rf"\b{re.escape(label)}\s*:\s*(.*?)(?=\b(?:opening style tag|summary|key events?|word count(?: estimate)?)\s*:|$)",
+            re.IGNORECASE | re.DOTALL,
+        )
+        match = pattern.search(text)
+        if not match:
+            return "", text
+
+        value = match.group(1).strip()
+        remaining = (text[:match.start()] + text[match.end():]).strip(" ,;:-.")
+        remaining = re.sub(r"\s{2,}", " ", remaining)
+        return value, remaining
 
     def _extract_opening_style(self, text: str) -> tuple[str, str]:
         match = re.search(
@@ -284,6 +315,7 @@ class StructureStep(BaseStep):
 
     def _clean_title_cell(self, text: str) -> str:
         text = re.sub(r"\*\*", "", text).strip()
+        text = re.sub(r"^\s*Title\s*:\s*", "", text, flags=re.IGNORECASE)
         text = re.sub(r"^\s*Chapter\s*\d+\s*[—–-]\s*", "", text, flags=re.IGNORECASE)
         return text.strip()
 
@@ -377,6 +409,21 @@ class StructureStep(BaseStep):
                     self.glossary_manager.auto_populate_from_chapter(
                         plot, chapter.get("title", f"Chapter {chapter_number}"), self.ai_service
                     )
+
+                self.project_manager.save_checkpoint(
+                    f"structure_chapter_{chapter_number:02d}",
+                    {
+                        "chapter_key": chapter_key,
+                        "chapter_number": chapter_number,
+                        "title": chapter.get("title", f"Chapter {chapter_number}"),
+                        "opening_style": chapter.get("opening_style", ""),
+                        "word_count_estimate": int(chapter.get("word_count_estimate", 1500)),
+                        "chapter_plot": chapter_plots[chapter_key],
+                        "chapter_plots": chapter_plots,
+                        "structure_content": self.get_step_data().get("structure_content", ""),
+                        "completed_chapters": len(chapter_plots),
+                    },
+                )
 
                 self.save_step_data({
                     "structure_content": self.get_step_data().get("structure_content", ""),

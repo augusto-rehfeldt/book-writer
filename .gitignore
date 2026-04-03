@@ -5,6 +5,7 @@ book_output/
 __pycache__/
 *.py[cod]
 *.pyc
+tests/
 
 # Local/OS files
 .DS_Store

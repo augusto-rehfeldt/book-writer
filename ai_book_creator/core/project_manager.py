@@ -13,6 +13,7 @@ STEP_SEQUENCE = [
     ("structure", "Step 1: Chapter Structure"),
     ("written", "Step 2: Writing Chapters"),
     ("reviewed", "Step 3: Review"),
+    ("ebook", "Step 4: Ebook Export"),
 ]
 
 
@@ -134,6 +135,7 @@ class ProjectManager:
             "refined",
             "written",
             "reviewed",
+            "ebook",
             "fixed",
         ]
         for step in step_names:
@@ -264,6 +266,24 @@ class ProjectManager:
                 and self._is_step_valid("written")
                 and int(step_data.get("chapter_count", 0)) == len(written_chapters)
                 and int(step_data.get("total_word_count", 0)) == int(written_data.get("total_word_count", 0))
+            )
+
+        if step_name == "ebook":
+            output_file = step_data.get("output_file", "")
+            written_data = self.get_step_data("written")
+            reviewed_data = self.get_step_data("reviewed")
+            written_chapters = written_data.get("chapters", {})
+            source_chapter_count = len(written_chapters)
+            source_written_words = int(written_data.get("total_word_count", 0))
+            source_reviewed_words = int(reviewed_data.get("total_word_count", source_written_words))
+            return (
+                bool(output_file)
+                and os.path.exists(output_file)
+                and self._is_step_valid("written")
+                and self._is_step_valid("reviewed")
+                and int(step_data.get("source_chapter_count", 0)) == source_chapter_count
+                and int(step_data.get("source_written_word_count", 0)) == source_written_words
+                and int(step_data.get("source_reviewed_word_count", 0)) == source_reviewed_words
             )
 
         return True
