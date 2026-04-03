@@ -410,6 +410,21 @@ class StructureStep(BaseStep):
                         plot, chapter.get("title", f"Chapter {chapter_number}"), self.ai_service
                     )
 
+                self.project_manager.save_checkpoint(
+                    f"structure_chapter_{chapter_number:02d}",
+                    {
+                        "chapter_key": chapter_key,
+                        "chapter_number": chapter_number,
+                        "title": chapter.get("title", f"Chapter {chapter_number}"),
+                        "opening_style": chapter.get("opening_style", ""),
+                        "word_count_estimate": int(chapter.get("word_count_estimate", 1500)),
+                        "chapter_plot": chapter_plots[chapter_key],
+                        "chapter_plots": chapter_plots,
+                        "structure_content": self.get_step_data().get("structure_content", ""),
+                        "completed_chapters": len(chapter_plots),
+                    },
+                )
+
                 self.save_step_data({
                     "structure_content": self.get_step_data().get("structure_content", ""),
                     "chapter_plots": chapter_plots,
