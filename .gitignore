@@ -7,6 +7,7 @@ __pycache__/
 *.pyc
 tests/
 benchmarks/
+codebase_to_text_output.txt
 
 # Local/OS files
 .DS_Store
