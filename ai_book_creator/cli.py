@@ -52,7 +52,11 @@ def _load_last_provider(default_provider: str = "google") -> str:
 
 def _default_openai_model() -> str:
     try:
-        with open(PROVIDER_CONFIG_MAP["openai"], "r", encoding="utf-8") as f:
+        base_path = Path(PROVIDER_CONFIG_MAP["openai"])
+        local_path = base_path.with_name(base_path.stem + ".local.json")
+        path_to_load = local_path if local_path.exists() else base_path
+        
+        with open(path_to_load, "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             candidate = str(data.get("writing_model") or data.get("review_model") or "").lower()
@@ -279,7 +283,15 @@ def _prepare_fresh_start() -> None:
 
 
 def run(provider: str) -> None:
-    config_path = PROVIDER_CONFIG_MAP[provider]
+    base_config_path = Path(PROVIDER_CONFIG_MAP[provider])
+    local_config_path = base_config_path.with_name(base_config_path.stem + ".local.json")
+    
+    if local_config_path.exists():
+        config_path = str(local_config_path)
+        print(f"Loaded local configuration: {local_config_path.name}")
+    else:
+        config_path = str(base_config_path)
+
     os.environ["AI_CONFIG_PATH"] = config_path
 
     openai_model = None

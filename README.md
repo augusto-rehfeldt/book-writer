@@ -57,7 +57,12 @@ README.md                     # This file
    ```bash
    pip install -r requirements.txt
    ```
-3. Set your API key securely with environment variables:
+3. Set up your local configurations and limits by running the setup script:
+   ```bash
+   python setup.py
+   ```
+   - This generates local .json configuration files inside ai_book_creator/config/ which are safely ignored by git. You can modify these to update your own daily usage limits, models, and constraints without impacting the codebase.
+4. Set your API key securely with environment variables:
    - `OPENAI_API_KEY` for OpenAI
    - `GROQ_API_KEY` for Groq
    - `GOOGLE_API_KEY` for Gemini
@@ -198,7 +203,7 @@ The glossary system is extensible - add new categories or data fields as needed.
 - **API Key**: Ensure your API key is valid
 - **Token Limits**: The system auto-adjusts, but very long prompts may need manual reduction
 - **File Permissions**: Ensure write access to the output directory
-- **Budget Pause**: If the active provider hits its configured daily or rate limit, the app saves progress and pauses until you choose to continue
+- **Budget Pause**: If the active provider hits 95% of its configured daily set maximum tokens (measuring both prompt input and completion output tokens), the app gracefully saves progress and pauses until you choose to continue or limits reset. You can easily modify your limits in the `ai_book_creator/config/*.local.json` config files.
 
 ### Resume After Interruption
 Simply run the script again - it will automatically detect and resume from the last completed step.

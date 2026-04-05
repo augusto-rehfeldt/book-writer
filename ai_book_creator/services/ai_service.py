@@ -438,6 +438,7 @@ class AIService:
         rpm_limit = self._groq_limit_value("rpm")
         rpd_limit = self._groq_limit_value("rpd")
         tpd_limit = int(self.groq_daily_token_limit)
+        effective_tpd_limit = int(tpd_limit * 0.95) # Stop when within 5% of max daily tokens
 
         if minute_requests >= rpm_limit:
             self._groq_wait_for_next_minute(
@@ -459,10 +460,10 @@ class AIService:
                 usage_state_path=self.groq_rate_state_path,
             )
 
-        if int(self._groq_rate_state.get("day_tokens", 0)) + tokens_to_spend > tpd_limit:
+        if int(self._groq_rate_state.get("day_tokens", 0)) + tokens_to_spend > effective_tpd_limit:
             self._budget_pause_requested = True
             self._budget_pause_reason = (
-                f"Groq daily token limit would be exceeded for '{model_name}' "
+                f"Groq daily token limit threshold (95% safety margin) would be exceeded for '{model_name}' "
                 f"({int(self._groq_rate_state.get('day_tokens', 0)) + tokens_to_spend:,}/{tpd_limit:,} estimated tokens today)."
             )
             raise UsageLimitExceeded(
@@ -473,27 +474,6 @@ class AIService:
                 model_name=model_name,
                 usage_state_path=self.groq_rate_state_path,
             )
-
-        if minute_tokens + tokens_to_spend > tpm_limit:
-            if tokens_to_spend > tpm_limit:
-                self._budget_pause_requested = True
-                self._budget_pause_reason = (
-                    f"Groq TPM limit would still be exceeded for '{model_name}' "
-                    f"even after waiting for reset ({tokens_to_spend:,}/{tpm_limit:,} estimated tokens)."
-                )
-                raise UsageLimitExceeded(
-                    provider="Groq",
-                    metric="TPM",
-                    tokens_used=tokens_to_spend,
-                    token_limit=tpm_limit,
-                    model_name=model_name,
-                    usage_state_path=self.groq_rate_state_path,
-                )
-            self._groq_wait_for_next_minute(
-                f"Groq TPM limit would be exceeded for '{model_name}' "
-                f"({minute_tokens + tokens_to_spend:,}/{tpm_limit:,} estimated tokens this minute)."
-            )
-            return
 
     def _extract_usage_from_response(self, resp: Any, prompt: str, response_text: str) -> Dict[str, int]:
         usage = None
@@ -554,10 +534,12 @@ class AIService:
         bucket_models = bucket_state.setdefault("models", {})
         bucket_models[model_name] = int(bucket_models.get(model_name, 0)) + int(usage["total_tokens"])
 
-        exceeded = bucket_state["tokens"] > bucket_state["limit"]
+        effective_limit = int(bucket_state["limit"] * 0.95) # Stop when within 5% of max
+        exceeded = bucket_state["tokens"] > effective_limit
+        
         self._usage_state["paused"] = exceeded
         self._usage_state["pause_reason"] = (
-            f"{bucket} budget exceeded for {model_name}"
+            f"{bucket} budget exceeded safety threshold for {model_name}"
             if exceeded
             else ""
         )
@@ -566,7 +548,7 @@ class AIService:
         if exceeded:
             self._budget_pause_requested = True
             self._budget_pause_reason = (
-                f"OpenAI {bucket} budget exceeded for '{model_name}' "
+                f"OpenAI {bucket} budget threshold (95% safety margin) exceeded for '{model_name}' "
                 f"({bucket_state['tokens']:,}/{bucket_state['limit']:,} tokens today)."
             )
 
@@ -597,11 +579,13 @@ class AIService:
         model_state["requests"] = int(model_state.get("requests", 0)) + 1
         model_state["tokens"] = int(model_state.get("tokens", 0)) + tokens
 
+        effective_tpd_limit = int(int(self.groq_daily_token_limit) * 0.95)
+
         exceeded = (
             int(self._groq_rate_state["minute_tokens"]) > tpm_limit
             or int(self._groq_rate_state["minute_requests"]) > rpm_limit
             or int(self._groq_rate_state["day_requests"]) > rpd_limit
-            or int(self._groq_rate_state["day_tokens"]) > int(self.groq_daily_token_limit)
+            or int(self._groq_rate_state["day_tokens"]) > effective_tpd_limit
         )
         self._groq_rate_state["paused"] = exceeded
         self._groq_rate_state["pause_reason"] = (
@@ -614,7 +598,7 @@ class AIService:
         if exceeded:
             self._budget_pause_requested = True
             self._budget_pause_reason = (
-                f"Groq rate limit exceeded for '{model_name}' "
+                f"Groq rate limit or 95% safety threshold exceeded for '{model_name}' "
                 f"(minute tokens {self._groq_rate_state['minute_tokens']:,}/{tpm_limit:,}, "
                 f"minute requests {self._groq_rate_state['minute_requests']:,}/{rpm_limit:,}, "
                 f"day requests {self._groq_rate_state['day_requests']:,}/{rpd_limit:,}, "
@@ -869,7 +853,8 @@ class AIService:
                     self._reset_usage_state_if_needed(self._usage_state)
                     bucket = self._bucket_for_model(model_to_use)
                     bucket_state = self._usage_state["buckets"].get(bucket, {})
-                    if int(bucket_state.get("tokens", 0)) > int(bucket_state.get("limit", 0)):
+                    effective_limit = int(int(bucket_state.get("limit", 0)) * 0.95)
+                    if int(bucket_state.get("tokens", 0)) > effective_limit:
                         self._budget_pause_requested = True
                         raise DailyTokenBudgetExceeded(
                             bucket=bucket,
