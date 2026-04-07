@@ -105,16 +105,11 @@ class StructureStep(BaseStep):
         return structure_data
 
     # -------------------------------------------------------------------------
-    # NEW: Replace AI‑generated character names with random picks from pools
+    # Replace AI‑generated character names with random picks from pools
     # -------------------------------------------------------------------------
     def _replace_character_names_with_pools(
         self, layout_content: str, name_pools: Dict[str, List[str]], init_data: Dict
     ) -> tuple[str, int]:
-        """
-        Parse the "Main Characters" section in the layout, replace each name
-        with a random name from the appropriate pool, and return the updated
-        layout and the number of replacements.
-        """
         # Find the "Main Characters" section
         main_char_section_match = re.search(
             r"(?i)(?:##\s*Main\s+Characters|###\s*Main\s+Characters)(.*?)(?=\n##|\n###|\Z)",
@@ -129,9 +124,6 @@ class StructureStep(BaseStep):
         replaced_count = 0
         new_section_lines = []
 
-        # Pattern to match a character entry:
-        # Either "1. **Name**" or "- **Name**" or just "**Name**" on its own line
-        # Followed by role/description lines (starting with "- **Role:**" etc.)
         lines = section_text.splitlines()
         i = 0
         while i < len(lines):
@@ -141,23 +133,21 @@ class StructureStep(BaseStep):
             bold_name_match = re.search(r"\*\*([^*]+)\*\*", stripped)
             if bold_name_match and not stripped.startswith(("Role", "Description", "- **Role")):
                 old_name = bold_name_match.group(1).strip()
-                # Determine a suitable pool category (default to "protagonists")
+                # Determine a suitable pool category
                 pool_category = "protagonists"
-                # Look at the next line for role hints
                 role_hint = ""
                 if i + 1 < len(lines):
                     next_line = lines[i + 1].strip()
                     if "Role:" in next_line or "role:" in next_line:
                         role_hint = next_line
-                # Simple role mapping: if role contains "antagonist", use "antagonists"
                 if "antagonist" in role_hint.lower():
                     pool_category = "antagonists"
                 elif "sidekick" in role_hint.lower() or "support" in role_hint.lower():
                     pool_category = "supporting_characters"
+                
                 # Pick a random name from the pool
                 new_name = pick_random_name(name_pools, pool_category, "any_character")
                 if not new_name:
-                    # Fallback: try any pool
                     for pool in name_pools.values():
                         if pool:
                             new_name = pool[0]
@@ -167,9 +157,8 @@ class StructureStep(BaseStep):
                     new_line = line.replace(f"**{old_name}**", f"**{new_name}**")
                     new_section_lines.append(new_line)
                     replaced_count += 1
-                    # Also update glossary manager with the new character
+                    # Update glossary manager
                     if self.glossary_manager:
-                        # Collect description from following lines until next character
                         desc_lines = []
                         j = i + 1
                         while j < len(lines) and not re.search(r"\*\*[^*]+\*\*", lines[j].strip()):
@@ -186,22 +175,41 @@ class StructureStep(BaseStep):
         if replaced_count == 0:
             return layout_content, 0
 
-        # Rebuild the layout content with the modified section
         new_section_text = "\n".join(new_section_lines)
         new_layout = layout_content.replace(original_section, new_section_text)
         return new_layout, replaced_count
 
-    # -------------------------------------------------------------------------
-    # Existing methods (unchanged except for small adjustments)
-    # -------------------------------------------------------------------------
     def _create_structure(self, init_data: Dict) -> str:
         print("🔄 Generating chapter structure...")
         prompt, max_completion_tokens = self._build_structure_prompt(init_data)
         structure = self.ai_service.generate_content(prompt, max_completion_tokens=max_completion_tokens)
-        print("\n📚 CHAPTER STRUCTURE:")
-        print("-" * 50)
-        print(structure)
-        print("-" * 50)
+
+        # Interactive loop for adjusting structure
+        while True:
+            print("\n📚 CURRENT CHAPTER STRUCTURE:")
+            print("-" * 50)
+            print(structure)
+            print("-" * 50)
+
+            feedback = input("\nPress Enter to accept this structure, or type feedback to revise it: ").strip()
+            if not feedback:
+                break
+
+            print("\n🔄 Revising chapter structure based on your feedback...")
+            rev_prompt = self.ai_service.build_sectioned_prompt(
+                instruction="Revise the chapter structure based on the user's feedback. Maintain the exact same output formatting rules as before (numbered list/table format, opening style tags, word count estimates).",
+                sections=[
+                    ("Current Structure", structure),
+                    ("User Feedback", feedback)
+                ],
+                max_prompt_tokens=6000,
+                section_token_caps={
+                    "Current Structure": 3000,
+                    "User Feedback": 500
+                }
+            )
+            structure = self.ai_service.generate_content(rev_prompt, max_completion_tokens=max_completion_tokens)
+
         return structure
 
     def _build_structure_prompt(self, init_data: Dict) -> tuple[str, int]:

@@ -238,9 +238,62 @@ class InitStep(BaseStep):
             return f"Focus ONLY on Book {book_number} content:\n{match.group(1).strip()}"
         return f"IMPORTANT: Generate layout ONLY for Book {book_number} of the series. Ignore later book details.\n\n{series_layout}"
     
-    def _generate_layout(self, book_idea: str, page_count: int, series_layout_content: str = "") -> str:
-        print("\n🔄 Generating book layout...")
+    def _generate_plot_options(self, book_idea: str, series_layout_content: str = "") -> str:
+        print("\n🔄 Generating plot options to choose from...")
         sections = [("Book idea", book_idea)]
+        if series_layout_content:
+            sections.append(("Series layout context", series_layout_content))
+
+        prompt = self.ai_service.build_sectioned_prompt(
+            instruction="Based on the book idea, generate 3 distinct and detailed plot directions/outlines for this specific book. Number them Option 1, Option 2, and Option 3. For each, describe the core conflict, the protagonist's arc, and the main climax.",
+            sections=sections,
+            max_prompt_tokens=2500,
+            section_token_caps={
+                "Book idea": 500,
+                "Series layout context": 1000
+            }
+        )
+        options_text = self.ai_service.generate_content(prompt, max_completion_tokens=2000)
+
+        while True:
+            print("\n" + "="*50)
+            print("🎲 PLOT OPTIONS:")
+            print("="*50)
+            print(options_text)
+            print("="*50)
+
+            choice = input("\nWhich option do you prefer? (1/2/3) or type custom feedback to regenerate: ").strip()
+            if choice in ['1', '2', '3']:
+                return f"Selected Option {choice} from the following proposals:\n\n{options_text}"
+            elif choice:
+                print("\n🔄 Regenerating with your feedback...")
+                # Update sections with feedback
+                rev_sections = sections.copy()
+                rev_sections.append(("Current Options", options_text))
+                rev_sections.append(("User Feedback", choice))
+
+                rev_prompt = self.ai_service.build_sectioned_prompt(
+                    instruction="Based on the book idea and user feedback, generate 3 NEW distinct plot directions.",
+                    sections=rev_sections,
+                    max_prompt_tokens=4000,
+                    section_token_caps={
+                        "Book idea": 300,
+                        "Series layout context": 500,
+                        "Current Options": 1500,
+                        "User Feedback": 500
+                    }
+                )
+                options_text = self.ai_service.generate_content(rev_prompt, max_completion_tokens=2000)
+
+    def _generate_layout(self, book_idea: str, page_count: int, series_layout_content: str = "") -> str:
+        # Step 1: Provide multiple options
+        plot_direction = self._generate_plot_options(book_idea, series_layout_content)
+
+        print("\n🔄 Generating full book layout based on selected plot...")
+        sections = [
+            ("Book idea", book_idea),
+            ("Chosen Plot Direction", plot_direction)
+        ]
         if series_layout_content:
             sections.append(("Series layout", series_layout_content))
         sections.append((
@@ -248,16 +301,38 @@ class InitStep(BaseStep):
             "3 potential titles; genre; target audience; 3-5 main themes; setting overview; "
             "three-act structure; 5-7 main characters with name, role, and brief description.",
         ))
+        
         prompt = self.ai_service.build_sectioned_prompt(
             instruction=f"Create a book layout targeting {page_count} pages. Be concise but complete.",
             sections=sections,
-            max_prompt_tokens=2000,
+            max_prompt_tokens=4000,
         )
-        layout = self.ai_service.generate_content(prompt, max_completion_tokens=1400)
-        print("\n📋 BOOK LAYOUT:")
-        print("-" * 50)
-        print(layout)
-        print("-" * 50)
+        layout = self.ai_service.generate_content(prompt, max_completion_tokens=1500)
+
+        # Step 2: Interactive review of Layout
+        while True:
+            print("\n📋 CURRENT BOOK LAYOUT:")
+            print("-" * 50)
+            print(layout)
+            print("-" * 50)
+
+            feedback = input("\nPress Enter to accept this layout, or type feedback to revise it: ").strip()
+            if not feedback:
+                break
+
+            print("\n🔄 Revising layout based on your feedback...")
+            rev_sections = [
+                ("Current Layout", layout),
+                ("User Feedback", feedback),
+                ("Required output", "Revise the layout incorporating the user feedback. Maintain the required output format.")
+            ]
+            rev_prompt = self.ai_service.build_sectioned_prompt(
+                instruction="Update the book layout based on the user's feedback.",
+                sections=rev_sections,
+                max_prompt_tokens=4000
+            )
+            layout = self.ai_service.generate_content(rev_prompt, max_completion_tokens=1500)
+
         return layout
     
     def _extract_first_title(self, layout_content: str) -> str:

@@ -78,7 +78,7 @@ class WriteStep(BaseStep):
                 print(f"\nSkipping already cached {chapter_data['title']}...")
                 continue
 
-            print(f"\nWriting {chapter_data['title']}...")
+            print(f"\nWriting {chapter_data['title']} (First Draft)...")
             
             glossary_context = ""
             if self.glossary_manager:
@@ -91,19 +91,43 @@ class WriteStep(BaseStep):
                 init_data.get("series_layout_content", ""),
             )
             
+            # Generating First Draft
             text = self.ai_service.generate_content(
                 prompt,
                 model_type="writing",
                 max_completion_tokens=4096,
             )
+
             if not text.strip():
                 raise BrokenProjectStateError(
                     f"Chapter text generation returned empty content for {chapter_data['title']}. "
                     "The step will be retried so the missing chapter is not skipped."
                 )
-            word_count = calculate_word_count(text)
+
+            word_count_initial = calculate_word_count(text)
+            print(f"First draft completed ({word_count_initial} words). Initiating second review/improvement pass...")
+
+            # --- Second Pass AI Edit ---
+            improvement_prompt = self._build_chapter_improvement_prompt(
+                text, chapter_data, glossary_context, min_words
+            )
+
+            improved_text = self.ai_service.generate_content(
+                improvement_prompt,
+                model_type="writing",
+                max_completion_tokens=4096,
+            )
+
+            if improved_text.strip():
+                text = improved_text
+                word_count = calculate_word_count(text)
+                print(f"Second pass completed ({word_count} words).")
+            else:
+                word_count = word_count_initial
+                print("Second pass returned empty. Using first draft instead.")
+            # ---------------------------
             
-            # Save chapter
+            # Save final chapter
             chapter_num = chapter_data['chapter_number']
             filename = os.path.join(self.output_dir, f"chapter_{chapter_num:02d}.txt")
             
@@ -124,7 +148,6 @@ class WriteStep(BaseStep):
                     text, chapter_data['title'], self.ai_service
                 )
             
-            print(f"Completed ({word_count} words)")
             written_data = {
                 "chapters": written_chapters,
                 "total_word_count": total_word_count,
@@ -215,3 +238,29 @@ Write at least {min_words} words.
 - Keep the narration character-driven and humane rather than detached.
 
 Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently placed at the very top of the text."""
+
+    def _build_chapter_improvement_prompt(
+        self,
+        draft_text: str,
+        chapter_data: Dict[str, Any],
+        glossary_context: str,
+        min_words: int
+    ) -> str:
+        return f"""You are an expert editor and author. Review and improve the following chapter draft.
+
+CHAPTER: {chapter_data['title']}
+PLOT OUTLINE: {chapter_data['plot_outline']}
+
+{glossary_context}
+
+DRAFT TEXT:
+{draft_text}
+
+INSTRUCTIONS:
+- Rewrite and elevate the prose to be more engaging, immersive, and showing rather than telling.
+- Enhance the sensory details, emotional depth, and pacing.
+- Ensure dialogue is natural and advances characterization or plot.
+- Fix any inconsistencies or repetitive sentence structures.
+- The final output MUST be at least {min_words} words.
+- Output ONLY the fully revised chapter text with markdown formatting. Include the chapter title as an H1 (`#`) at the top. Do not include any meta-commentary or notes.
+"""
