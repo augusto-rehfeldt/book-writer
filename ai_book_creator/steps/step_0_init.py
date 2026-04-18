@@ -262,7 +262,10 @@ class InitStep(BaseStep):
             print(options_text)
             print("="*50)
 
-            choice = input("\nWhich option do you prefer? (1/2/3) or type custom feedback to regenerate: ").strip()
+            try:
+                choice = input("\nWhich option do you prefer? (1/2/3) or type custom feedback to regenerate: ").strip()
+            except (EOFError, StopIteration):
+                choice = "1"
             if choice in ['1', '2', '3']:
                 return f"Selected Option {choice} from the following proposals:\n\n{options_text}"
             elif choice:
@@ -316,7 +319,10 @@ class InitStep(BaseStep):
             print(layout)
             print("-" * 50)
 
-            feedback = input("\nPress Enter to accept this layout, or type feedback to revise it: ").strip()
+            try:
+                feedback = input("\nPress Enter to accept this layout, or type feedback to revise it: ").strip()
+            except (EOFError, StopIteration):
+                feedback = ""
             if not feedback:
                 break
 

@@ -28,7 +28,7 @@ except Exception:
 
 
 DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "config", "ai_config_google.json"
+    os.path.dirname(__file__), "..", "config", "ai_config_google.local.json"
 )
 DEFAULT_USAGE_STATE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "config", "ai_usage_state.json"
@@ -94,7 +94,7 @@ class AIService:
         """
         Initialize AIService.
 
-        Config (ai_config_google.json) example:
+        Config (ai_config_google.local.json) example:
         {
             "provider": "openai" or "google" or "http",
             "use_openai_client": true,

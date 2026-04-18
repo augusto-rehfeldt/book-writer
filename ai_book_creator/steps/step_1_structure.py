@@ -191,7 +191,10 @@ class StructureStep(BaseStep):
             print(structure)
             print("-" * 50)
 
-            feedback = input("\nPress Enter to accept this structure, or type feedback to revise it: ").strip()
+            try:
+                feedback = input("\nPress Enter to accept this structure, or type feedback to revise it: ").strip()
+            except (EOFError, StopIteration):
+                feedback = ""
             if not feedback:
                 break
 
@@ -479,7 +482,7 @@ class StructureStep(BaseStep):
             return text
         return text[: max_chars - 3].rstrip() + "..."
     
-    def _create_plots(self, chapters: List[Dict], init_data: Dict, name_pools: Dict[str, List[str]]) -> Dict:
+    def _create_plots(self, chapters: List[Dict], init_data: Dict, name_pools: Optional[Dict[str, List[str]]] = None) -> Dict:
         chapter_plots = dict(self.get_step_data().get("chapter_plots", {}))
         series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900)
 

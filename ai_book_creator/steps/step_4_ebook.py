@@ -60,24 +60,30 @@ class EbookStep(BaseStep):
         print("📝 Generating a catchy book description for the EPUB metadata...")
         book_idea = init_data.get("book_idea", "")
         analysis = reviewed_data.get("analysis", "")
-        
-        prompt = self.ai_service.build_sectioned_prompt(
-            instruction=(
-                "Write a catchy, compelling back-cover blurb (book description) for this book. "
-                "Make it engaging for readers, highlighting the stakes, characters, and central conflict. "
-                "Keep it to 2-3 short paragraphs. Output ONLY the description text, no markdown, no quotes."
-            ),
-            sections=[
-                ("Book Concept", book_idea),
-                ("Book Analysis & Synopsis", analysis)
-            ]
-        )
-        
-        description = self.ai_service.generate_content(
-            prompt, 
-            model_type="writing", 
-            max_completion_tokens=500
-        ).strip()
+
+        if self.ai_service and hasattr(self.ai_service, "build_sectioned_prompt") and hasattr(self.ai_service, "generate_content"):
+            prompt = self.ai_service.build_sectioned_prompt(
+                instruction=(
+                    "Write a catchy, compelling back-cover blurb (book description) for this book. "
+                    "Make it engaging for readers, highlighting the stakes, characters, and central conflict. "
+                    "Keep it to 2-3 short paragraphs. Output ONLY the description text, no markdown, no quotes."
+                ),
+                sections=[
+                    ("Book Concept", book_idea),
+                    ("Book Analysis & Synopsis", analysis)
+                ]
+            )
+
+            description = self.ai_service.generate_content(
+                prompt,
+                model_type="writing",
+                max_completion_tokens=500
+            ).strip()
+        else:
+            description = (
+                f"{book_idea.strip()}\n\n"
+                f"{analysis.strip()}"
+            ).strip() or "A newly generated book."
 
         print("📦 Exporting EPUB ebook...")
         output_file = export_epub(self.output_dir, description=description)

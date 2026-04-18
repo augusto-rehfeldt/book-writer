@@ -21,7 +21,7 @@ class WriteStep(BaseStep):
     def _load_config(self):
         config_path = os.getenv(
             "AI_CONFIG_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_google.json"),
+            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_google.local.json"),
         )
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)

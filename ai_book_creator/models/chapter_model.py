@@ -1,6 +1,16 @@
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+try:
+    from pydantic import BaseModel, Field
+except ImportError:  # pragma: no cover - fallback for minimal environments
+    class BaseModel:
+        def __init__(self, **data):
+            for key, value in data.items():
+                setattr(self, key, value)
+
+    def Field(default=None, **kwargs):
+        return default
+
 
 class Scene(BaseModel):
     title: str = Field(description="Brief title or summary of the scene.")

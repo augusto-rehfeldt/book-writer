@@ -32,7 +32,7 @@ class AIBookCreator:
         os.makedirs(self.output_dir, exist_ok=True)
         self.config_path = os.getenv(
             "AI_CONFIG_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_google.json"),
+            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_google.local.json"),
         )
         
         # Load configuration

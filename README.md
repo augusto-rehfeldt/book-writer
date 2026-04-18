@@ -1,234 +1,168 @@
-# AI Book Creator v2.0 - Modular Edition
+# AI Book Creator
 
-A sophisticated, modular system for generating complete books using AI, now with comprehensive glossary management and improved resumability.
+AI Book Creator is a modular, AI-assisted book generation pipeline. It guides you through idea capture, book/series structure, chapter writing, review, and EPUB export, while keeping progress resumable through on-disk project state.
 
-## Features
+## What’s in the repo
 
-### Core Functionality
-- **Modular Architecture**: Each step is now a separate, focused module
-- **Full Resumability**: Interrupt and resume at any point
-- **Comprehensive Glossary**: Automatic tracking of characters, locations, concepts, and timeline
-- **Error Handling**: Robust retry mechanisms and error recovery
-- **Progress Tracking**: Detailed checkpoints and status monitoring
-
-### Glossary Management
-- **Character Tracking**: Names, descriptions, roles, relationships, first appearances
-- **Location Database**: Settings, significance, regional information
-- **Concept Registry**: Important themes, objects, systems, and plot devices
-- **Timeline Events**: Key plot points with chapter references
-- **Relationship Mapping**: Character connections and dynamics
-- **Automated Extraction**: AI-powered identification of glossary items
-- **Context Integration**: Glossary information used during writing
-
-## Project Structure
-
-```
-ai_book_creator/
-├── cli.py                      # Interactive book creation CLI
-├── project_cli.py              # Project management CLI
-├── __init__.py
-├── core/
-│   ├── book_creator.py        # Main orchestrator
-│   └── project_manager.py     # Project state management
-├── services/
-│   └── ai_service.py          # AI API communication
-├── steps/
-│   ├── __init__.py
-│   ├── base_step.py           # Base step class
-│   ├── step_0_init.py         # Book concept gathering
-│   ├── step_1_structure.py    # Chapter structure
-│   ├── step_2_write.py        # Full chapter writing
-│   ├── step_3_review.py       # Final consistency check
-│   └── step_4_ebook.py        # EPUB export
-└── utils/
-    ├── glossary_manager.py    # Glossary tracking system
-    └── text_utils.py          # Word/page utilities
-
-main.py                        # Thin wrapper around ai_book_creator.cli
-utils.py                       # Thin wrapper around ai_book_creator.project_cli
-requirements.txt              # Dependencies
-README.md                     # This file
+```text
+book writer/
+├── main.py                  # CLI wrapper for the main book-creation flow
+├── utils.py                 # CLI wrapper for project management commands
+├── setup.py                 # Helper to create local config copies
+├── requirements.txt         # Python dependencies
+├── README.md                # This file
+├── ai_book_creator/
+│   ├── cli.py               # Main interactive CLI
+│   ├── project_cli.py       # Project-management CLI
+│   ├── env.py               # Loads local environment variables
+│   ├── core/
+│   │   ├── book_creator.py   # Orchestrates the end-to-end workflow
+│   │   └── project_manager.py
+│   ├── services/
+│   │   └── ai_service.py     # Provider + budget management
+│   ├── steps/
+│   │   ├── step_0_init.py    # Idea / scope / layout setup
+│   │   ├── step_1_structure.py
+│   │   ├── step_2_write.py
+│   │   ├── step_3_review.py
+│   │   └── step_4_ebook.py
+│   ├── utils/
+│   │   ├── glossary_manager.py
+│   │   ├── ebook_exporter.py
+│   │   ├── text_utils.py
+│   │   ├── name_generator.py
+│   │   └── style_checks.py
+│   ├── models/
+│   │   └── chapter_model.py
+│   └── config/
+│       ├── ai_config_google.local.json
+│       ├── ai_config_openai.local.json
+│       └── ai_config_groq.local.json
+├── tests/
+└── book_output/
 ```
 
-## Installation
+## Requirements
 
-1. Clone or download the project files
-2. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-3. Set up your local configurations and limits by running the setup script:
-   ```bash
-   python setup.py
-   ```
-   - This generates local .json configuration files inside ai_book_creator/config/ which are safely ignored by git. You can modify these to update your own daily usage limits, models, and constraints without impacting the codebase.
-4. Set your API key securely with environment variables:
-   - `OPENAI_API_KEY` for OpenAI
-   - `GROQ_API_KEY` for Groq
-   - `GOOGLE_API_KEY` for Gemini
+- Python 3.12+ recommended
+- Install the packages in `requirements.txt`
+- API access for whichever provider you want to use:
+  - Google Gemini
+  - OpenAI
+  - Groq
 
-   A sample `.env.example` is included for local setups. The committed config files are safe templates; keep any private overrides in a `*.local.json` file so Git ignores them.
+## Setup
 
-### Groq Mode
-Groq is supported through the same OpenAI-compatible client path:
+Create a virtual environment and install dependencies:
 
-```powershell
-$env:AI_CONFIG_PATH="ai_book_creator/config/ai_config_groq.json"
-$env:GROQ_API_KEY="your-groq-key"
-python main.py
+```bash
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
 ```
 
-The Groq preset uses `groq/compound` and rate-limits itself to Groq's published limits: 70k TPM, 30 RPM, and 250 RPD.
+The repository already includes local provider config files in `ai_book_creator/config/`. Edit the `.local.json` file for the provider you want to use.
 
-If you want local-only changes to the model or timeout settings, copy a preset to a file such as `ai_book_creator/config/ai_config_groq.local.json` and edit that copy. Files matching `*.local.json` are ignored by Git.
+If you want to refresh or recreate local config files, run:
 
-## Usage
+```bash
+python setup.py
+```
 
-### Basic Usage
+## Configuration
+
+The active config file is controlled by `AI_CONFIG_PATH`.
+
+By default, the app now uses the committed local Google config:
+
+- `ai_book_creator/config/ai_config_google.local.json`
+
+You can also switch providers by setting `AI_CONFIG_PATH` to one of the other local presets:
+
+- `ai_book_creator/config/ai_config_openai.local.json`
+- `ai_book_creator/config/ai_config_groq.local.json`
+
+Useful environment variables:
+
+- `GOOGLE_API_KEY`
+- `OPENAI_API_KEY`
+- `GROQ_API_KEY`
+- `AI_CONFIG_PATH`
+- `AI_USAGE_STATE_PATH`
+- `AI_GROQ_RATE_STATE_PATH`
+- `AI_WRITING_MODEL`
+- `AI_REVIEW_MODEL`
+- `AI_BASE_URL`
+
+## Running the app
+
+Launch the main workflow from the repository root:
+
 ```bash
 python main.py
 ```
 
-### Project management CLI
-
-The top-level [`utils.py`](utils.py:1) is a thin wrapper around `ai_book_creator.project_cli` and provides a lightweight CLI for managing projects (list, status, backup, export-glossary, export-ebook, clean). Run it from the repository root:
+For project-management commands:
 
 ```bash
 python utils.py list
-python utils.py status <project_dir>
-python utils.py export-ebook <project_dir>
+python utils.py status book_output
+python utils.py export-ebook book_output
+python utils.py export-glossary book_output
+python utils.py backup book_output
+python utils.py clean book_output
+python utils.py repair book_output
 ```
 
-If your environment does not include the repo root on `PYTHONPATH`, you can run it with `PYTHONPATH` set explicitly:
+You can also run the package modules directly:
 
 ```bash
-PYTHONPATH=. python utils.py list
+PYTHONPATH=. python -m ai_book_creator.cli
+PYTHONPATH=. python -m ai_book_creator.project_cli list
 ```
 
-### Resuming a Project
-The system automatically detects and resumes existing projects. All progress is saved in `book_output/project_data.json`.
+## Workflow overview
 
-### Output Files
-- **Chapter Files**: `book_output/chapter_XX.txt` - Individual chapter files
-- **Project Data**: `book_output/project_data.json` - Complete project state
-- **Glossary**: `book_output/glossary.json` - Detailed glossary database
-- **Final Glossary**: `book_output/book_glossary.txt` - Human-readable glossary
-- **Analysis**: `book_output/book_summary_and_analysis.txt` - Final book analysis
-- **Ebook**: `book_output/ebook/<title>.epub` - Final EPUB export
-- **Cover Prompt**: `book_output/ebook/<title>_cover_prompt.txt` - Image prompt for a cover generator
+1. Step 0: Initialize the project scope, concept, page count, and initial layout
+2. Step 1: Build chapter structure and chapter plots
+3. Step 2: Write chapters to `book_output/`
+4. Step 3: Review and expand the manuscript if needed
+5. Step 4: Export the final EPUB
 
-## Step-by-Step Process
+The pipeline supports:
 
-### Step 0: Initialization
-- Choose whether you want a single book or a series
-- Collect the book idea and any high-level constraints
-- Generate a series layout when needed and show an estimated token budget
-- Establish the starting project state and output folder
+- Single-book or series generation
+- Resumable project state
+- Glossary tracking
+- Chapter checkpoints
+- Budget-aware pausing and resuming
+- EPUB export with a generated back-cover description
 
-### Step 1: Structure
-- Build the book layout and chapter structure
-- Generate the chapter plan used for writing
-- Save the structure so you can resume later
+## Output files
 
-### Step 2: Writing
-- Draft the full chapter text
-- Track glossary entries while chapters are generated
-- Write output into the `book_output/` project folder
+Generated artifacts live in `book_output/`:
 
-### Step 3: Review
-- Run a consistency and quality review
-- Cache the analysis and final summary
-- Mark the project complete or leave it ready for another pass
+- `project_data.json` — full project state
+- `ai_usage_state.json` — provider usage / budget tracking
+- `groq_usage_state.json` — Groq rate tracking
+- `glossary.json` — glossary database
+- `book_glossary.txt` — human-readable glossary export
+- `book_analysis.txt` — review output
+- `chapter_XX.txt` — generated chapters
+- `checkpoint_*.json` — chapter/structure checkpoints
+- `ebook/<title>.epub` — exported EPUB
+- `ebook/<title>_cover_prompt.txt` — cover prompt text
 
-### Step 4: Ebook Export
-- Build an EPUB from the generated chapters
-- Preserve markdown formatting in the exported ebook
-- Save the ebook in `book_output/ebook/`
+## Tests
 
-### Optional Repair
-- Use `python utils.py repair book_output` to clear later steps if the saved project becomes inconsistent
-- Use `python utils.py clean book_output` to remove temporary checkpoint files
+Run the test suite with:
 
-## Glossary System
-
-### Automatic Tracking
-The glossary system automatically identifies and tracks:
-- **Characters**: Protagonists, antagonists, supporting characters
-- **Locations**: Settings, regions, significant places
-- **Concepts**: Themes, magical systems, important objects
-- **Timeline**: Major plot events with chapter references
-- **Relationships**: Character connections and dynamics
-
-### Manual Management
-You can manually add entries using the GlossaryManager:
-```python
-glossary.add_character("John Doe", "Main protagonist, brave knight", "protagonist")
-glossary.add_location("Castle Blackstone", "Ancient fortress", "Capital Region")
-glossary.add_concept("Dragon Magic", "Elemental magic system", "magic")
+```bash
+PYTHONPATH=. python3 -m unittest discover -s tests -v
 ```
 
-### Context Integration
-Glossary information is automatically provided to the AI during writing to ensure consistency.
+## Notes
 
-## Error Handling
-
-### Automatic Recovery
-- Exponential backoff for API rate limits
-- Token limit detection and adjustment
-- Empty response handling
-- Network error recovery
-- Daily token budget pauses that cache partial work before stopping
-
-### Manual Recovery
-- Checkpoint system for partial progress
-- Step-by-step resumability
-- Failed chapter retry mechanisms
-
-## Customization
-
-### Adding New Steps
-1. Inherit from `BaseStep`
-2. Implement the step logic in `ai_book_creator/steps/`
-3. Register the step in `ai_book_creator/core/book_creator.py`
-
-### Modifying AI Prompts
-Each step contains its own prompt templates that can be customized for different genres or styles.
-
-### Extending Glossary
-The glossary system is extensible - add new categories or data fields as needed.
-
-## Troubleshooting
-
-### Common Issues
-- **API Key**: Ensure your API key is valid
-- **Token Limits**: The system auto-adjusts, but very long prompts may need manual reduction
-- **File Permissions**: Ensure write access to the output directory
-- **Budget Pause**: If the active provider hits 95% of its configured daily set maximum tokens (measuring both prompt input and completion output tokens), the app gracefully saves progress and pauses until you choose to continue or limits reset. You can easily modify your limits in the `ai_book_creator/config/*.local.json` config files.
-
-### Resume After Interruption
-Simply run the script again - it will automatically detect and resume from the last completed step.
-
-### Glossary Issues
-Check `book_output/glossary.json` for any data corruption. The file can be manually edited if needed.
-
-## Version History
-
-### v2.0.0 (Current)
-- Complete modular refactor
-- Added comprehensive glossary system
-- Improved resumability
-- Better error handling
-- Enhanced project management
-
-### v1.0.0 (Original)
-- Monolithic book creation system
-- Basic resumability
-- Simple error handling
-
-## License
-
-This project is open source. Modify and distribute as needed.
-
-## Support
-
-For issues or questions, review the error messages and troubleshooting section. The system provides detailed error information to help diagnose problems.
+- The repo’s `__init__.py` only exposes the main public classes now; importing `ai_book_creator` no longer eagerly imports every step module.
+- `chapter_model.py` includes a lightweight fallback when `pydantic` is unavailable, which keeps the test suite importable in minimal environments.
+- `setup.py` is mainly a convenience script for local config management; the committed `.local.json` files are already usable as-is.
