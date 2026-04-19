@@ -22,6 +22,7 @@ PROVIDER_CONFIG_MAP = {
     "google": str(PACKAGE_ROOT / "config" / "ai_config_google.local.json"),
     "openai": str(PACKAGE_ROOT / "config" / "ai_config_openai.local.json"),
     "groq": str(PACKAGE_ROOT / "config" / "ai_config_groq.local.json"),
+    "minimax": str(PACKAGE_ROOT / "config" / "ai_config_minimax.local.json"),
 }
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"

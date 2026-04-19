@@ -6,6 +6,7 @@ import math
 import re
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, List, Tuple
 
 import requests
@@ -28,7 +29,7 @@ except Exception:
 
 
 DEFAULT_CONFIG_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "config", "ai_config_google.local.json"
+    os.path.dirname(__file__), "..", "config", "ai_config_minimax.local.json"
 )
 DEFAULT_USAGE_STATE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "config", "ai_usage_state.json"
@@ -109,8 +110,8 @@ class AIService:
 
         self.provider = self.config.get("provider", "openai").lower()
         self.api_key = self._resolve_api_key()
-        self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "gpt-5.4-mini"))
-        self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "gpt-5.4"))
+        self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "MiniMax-M2.7"))
+        self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "MiniMax-M2.7"))
         self.openai_big_models = {
             str(model).strip().lower()
             for model in self.config.get("openai_big_models", list(self.OPENAI_BIG_MODELS))
@@ -173,12 +174,65 @@ class AIService:
             os.getenv("OPENAI_API_KEY", ""),
             os.getenv("GROQ_API_KEY", ""),
             os.getenv("GOOGLE_API_KEY", ""),
+            os.getenv("MINIMAX_API_KEY", ""),
             self.config.get("api_key", ""),
         ]
         for candidate in candidates:
             if candidate:
                 return candidate
         return ""
+
+    def _api_key_env_name(self) -> str:
+        env_key_map = {
+            "openai": "OPENAI_API_KEY",
+            "groq": "GROQ_API_KEY",
+            "google": "GOOGLE_API_KEY",
+            "minimax": "MINIMAX_API_KEY",
+        }
+        return str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
+
+    def _handle_401_auth_error(self, error_msg: str = "") -> bool:
+        """Handle a 401 auth error by prompting for a new API key.
+        Returns True if a new key was provided and the session was re-init'd (caller should retry).
+        Returns False if the user declined to enter a key (caller should raise).
+        """
+        api_key_env = self._api_key_env_name()
+        print(f"\n[!] {self.provider} API request returned 401 Unauthorized.")
+        print(f"    Your {api_key_env} is missing or invalid.")
+        new_key = input(f"    Enter your {api_key_env} (will be saved to .env): ").strip()
+        if new_key:
+            self._save_api_key_to_dotenv(api_key_env, new_key)
+            os.environ[api_key_env] = new_key
+            self.api_key = new_key
+            self.client = None
+            self.session = None
+            self._init_client()
+            print(f"    ✓ {api_key_env} saved. Retrying...")
+            return True
+        else:
+            print("    Skipping — no key provided.")
+            return False
+
+    def _save_api_key_to_dotenv(self, key: str, value: str) -> None:
+        env_path = Path(__file__).resolve().parent.parent / ".env"
+        env_lines = []
+        if env_path.exists():
+            env_lines = env_path.read_text(encoding="utf-8").splitlines()
+
+        # Check if key already exists
+        key_exists = False
+        new_lines = []
+        for line in env_lines:
+            if line.strip().startswith(f"{key}="):
+                new_lines.append(f"{key}={value}")
+                key_exists = True
+            else:
+                new_lines.append(line)
+
+        if not key_exists:
+            new_lines.append(f"{key}={value}")
+
+        env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
     def _resolve_base_url(self) -> str:
         default_base_urls = {
@@ -693,7 +747,7 @@ class AIService:
         self.client = None
         self.session = None
 
-        if self.provider in ("openai", "groq") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider in ("openai", "groq", "minimax") and self.use_openai_client and _HAS_OPENAI_CLIENT:
             try:
                 self.client = OpenAI(
                     api_key=self.api_key, base_url=self.base_url
@@ -701,7 +755,7 @@ class AIService:
                 if self.provider == "groq":
                     print("Using OpenAI-compatible client for Groq")
                 else:
-                    print("Using OpenAI Python client")
+                    print(f"Using OpenAI Python client for {self.provider} at {self.base_url}")
                 return
             except Exception as e:
                 print(f"{self.provider.title()} client initialization failed, falling back to HTTP. Error:", e)
@@ -879,6 +933,35 @@ class AIService:
                         return text
                     print(f"[gemini] returned empty content on attempt {attempt + 1}")
 
+                elif self.client is not None and self.provider == "minimax":
+                    # OpenAI Python client (MiniMax OpenAI-compatible API)
+                    try:
+                        resp = self.client.chat.completions.create(
+                            model=model_to_use,
+                            messages=[{"role": "user", "content": request_prompt}],
+                            max_completion_tokens=completion_tokens,
+                            timeout=self.timeout,
+                        )
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        is_401 = (
+                            getattr(e, "status_code", None) == 401
+                            or "401" in error_str
+                            or "unauthorized" in error_str
+                            or "authorized_error" in error_str
+                        )
+                        if is_401:
+                            retry_ok = self._handle_401_auth_error(str(e))
+                            if retry_ok:
+                                continue
+                        last_error = e
+                        print(f"[{self.provider}_client] client call failed on attempt {attempt + 1}: {e}")
+                        raise
+                    text = self._extract_text_from_response(resp)
+                    if text and text.strip():
+                        return text
+                    print(f"[{self.provider}_client] returned empty content on attempt {attempt + 1}")
+
                 elif self.client is not None and self.provider == "openai":
                     # OpenAI Python client
                     try:
@@ -939,7 +1022,7 @@ class AIService:
                     if self.session is None:
                         raise RuntimeError("HTTP session is not initialized")
 
-                    if self.provider == "groq":
+                    if self.provider in ("groq", "minimax"):
                         url = self.base_url.rstrip("/") + "/chat/completions"
                         payload = {
                             "model": model_to_use,
@@ -1005,6 +1088,11 @@ class AIService:
                                         usage_state_path=self.groq_rate_state_path,
                                     )
                             print(f"[http] transient HTTP error {r.status_code} - will retry (attempt {attempt + 1})")
+                        elif r.status_code == 401:
+                            # 401 means auth failure — prompt for API key and save to .env
+                            if self._handle_401_auth_error():
+                                continue
+                            r.raise_for_status()
                         else:
                             print(f"[http] HTTP error {r.status_code}: {r.text}")
                             r.raise_for_status()
