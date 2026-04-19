@@ -871,13 +871,22 @@ class AIService:
                     elif "text" in first:
                         texts.append(first["text"])
                 # MiniMax Anthropic API: content is a list of {type, text/thinking, ...} blocks
-                if not texts and "content" in resp and isinstance(resp["content"], list):
-                    for c in resp["content"]:
-                        if isinstance(c, dict):
-                            if c.get("type") == "thinking":
-                                continue  # skip thinking blocks
-                            if "text" in c:
-                                texts.append(c["text"])
+                if not texts and "content" in resp:
+                    if isinstance(resp["content"], list):
+                        for c in resp["content"]:
+                            if isinstance(c, dict):
+                                if c.get("type") == "thinking":
+                                    continue  # skip thinking blocks
+                                if "text" in c:
+                                    texts.append(c["text"])
+                    elif isinstance(resp["content"], str) and resp["content"].strip():
+                        texts.append(resp["content"])
+                    elif isinstance(resp["content"], dict):
+                        cc = resp["content"]
+                        if cc.get("type") == "text" and "text" in cc:
+                            texts.append(cc["text"])
+                        elif "text" in cc and isinstance(cc["text"], str):
+                            texts.append(cc["text"])
         except Exception:
             pass
 
@@ -1086,6 +1095,9 @@ class AIService:
                                     )
                             return text
                         print(f"[http] returned empty content on attempt {attempt + 1}")
+                        if self.provider == "minimax":
+                            print(f"[minimax] debug response data keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                            print(f"[minimax] debug response: {str(data)[:500]}")
                     else:
                         if r.status_code in (429, 502, 503, 504):
                             if self.provider == "groq":
