@@ -781,22 +781,27 @@ class AIService:
     def _extract_text_from_response(self, resp: Any) -> str:
         """
         Normalize different response shapes to a text string.
+        Handles OpenAI client responses, chat completions, Gemini, and HTTP/JSON responses.
+        For MiniMax Anthropic API: strips <thinking>...</thinking> blocks from output.
         """
+        texts: List[str] = []
+
         # OpenAI Python client convenience property (if present)
         try:
             if hasattr(resp, "output_text"):
-                return str(resp.output_text)
-            if hasattr(resp, "output") and isinstance(resp.output, list) and resp.output:
-                parts = []
+                texts.append(str(resp.output_text))
+            elif hasattr(resp, "output") and isinstance(resp.output, list) and resp.output:
                 for item in resp.output:
                     if isinstance(item, dict) and "content" in item and isinstance(item["content"], list):
                         for c in item["content"]:
-                            if isinstance(c, dict) and "text" in c:
-                                parts.append(c["text"])
+                            if isinstance(c, dict):
+                                # MiniMax Anthropic API content blocks may have text or type
+                                if c.get("type") == "text" and "text" in c:
+                                    texts.append(c["text"])
+                                elif "text" in c:
+                                    texts.append(c["text"])
                     elif isinstance(item, str):
-                        parts.append(item)
-                if parts:
-                    return "\n".join(parts)
+                        texts.append(item)
         except Exception:
             pass
 
@@ -804,7 +809,6 @@ class AIService:
         try:
             choices = getattr(resp, "choices", None)
             if choices:
-                parts = []
                 for choice in choices:
                     message = getattr(choice, "message", None)
                     if message is None and isinstance(choice, dict):
@@ -815,57 +819,72 @@ class AIService:
                         content = message.get("content")
 
                     if isinstance(content, str):
-                        parts.append(content)
+                        texts.append(content)
                     elif isinstance(content, list):
                         for item in content:
-                            if isinstance(item, dict) and "text" in item:
-                                parts.append(item["text"])
+                            if isinstance(item, dict):
+                                if item.get("type") == "text" and "text" in item:
+                                    texts.append(item["text"])
+                                elif "text" in item:
+                                    texts.append(item["text"])
                             else:
-                                parts.append(str(item))
-                if parts:
-                    return "\n".join(parts)
+                                texts.append(str(item))
         except Exception:
             pass
 
         # Gemini response
         try:
-            if hasattr(resp, "text"):
-                return str(resp.text)
+            if hasattr(resp, "text") and not texts:
+                texts.append(str(resp.text))
         except Exception:
             pass
 
         # HTTP response JSON
         try:
-            if isinstance(resp, dict):
+            if isinstance(resp, dict) and not texts:
                 if "output" in resp:
                     out = resp["output"]
                     if isinstance(out, list):
-                        texts = []
                         for o in out:
                             if isinstance(o, dict) and "content" in o and isinstance(o["content"], list):
                                 for c in o["content"]:
-                                    if isinstance(c, dict) and "text" in c:
-                                        texts.append(c["text"])
+                                    if isinstance(c, dict):
+                                        if c.get("type") == "text" and "text" in c:
+                                            texts.append(c["text"])
+                                        elif "text" in c:
+                                            texts.append(c["text"])
                             elif isinstance(o, str):
                                 texts.append(o)
-                        if texts:
-                            return "\n".join(texts)
                 if "choices" in resp and isinstance(resp["choices"], list) and resp["choices"]:
                     first = resp["choices"][0]
                     if "message" in first and isinstance(first["message"], dict) and "content" in first["message"]:
                         content = first["message"]["content"]
                         if isinstance(content, str):
-                            return content
-                        if isinstance(content, list):
-                            return "\n".join(
-                                [c.get("text", "") if isinstance(c, dict) else str(c) for c in content]
-                            )
-                    if "text" in first:
-                        return first["text"]
+                            texts.append(content)
+                        elif isinstance(content, list):
+                            for c in content:
+                                if isinstance(c, dict):
+                                    if c.get("type") == "text" and "text" in c:
+                                        texts.append(c["text"])
+                                    elif "text" in c:
+                                        texts.append(c["text"])
+                    elif "text" in first:
+                        texts.append(first["text"])
+                # MiniMax Anthropic API: content is a list of {type, text/thinking, ...} blocks
+                if not texts and "content" in resp and isinstance(resp["content"], list):
+                    for c in resp["content"]:
+                        if isinstance(c, dict):
+                            if c.get("type") == "thinking":
+                                continue  # skip thinking blocks
+                            if "text" in c:
+                                texts.append(c["text"])
         except Exception:
             pass
 
-        return ""
+        result = "\n".join(texts)
+        # Strip <thinking>...</thinking> blocks (MiniMax extended thinking)
+        result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL).strip()
+        return result
 
     def _default_completion_tokens(self, model_type: str) -> int:
         if self.provider == "groq":
@@ -1022,14 +1041,14 @@ class AIService:
                     if self.session is None:
                         raise RuntimeError("HTTP session is not initialized")
 
-                    if self.provider in ("groq", "minimax"):
-                        url = self.base_url.rstrip("/") + "/chat/completions"
+                    if self.provider == "minimax":
+                        url = self.base_url.rstrip("/") + "/v1/messages"
                         payload = {
                             "model": model_to_use,
                             "messages": [{"role": "user", "content": request_prompt}],
-                            "max_completion_tokens": completion_tokens,
+                            "max_tokens": completion_tokens,
                         }
-                    else:
+                    elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"
                     try:
