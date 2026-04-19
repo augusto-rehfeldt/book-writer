@@ -870,20 +870,26 @@ class AIService:
                                         texts.append(c["text"])
                     elif "text" in first:
                         texts.append(first["text"])
-                # MiniMax Anthropic API: content is a list of {type, text/thinking, ...} blocks
+                # MiniMax Anthropic API: content is a list of blocks
+                # Blocks can have: type="text"/"thinking", or thinking key directly (extended thinking)
                 if not texts and "content" in resp:
                     if isinstance(resp["content"], list):
                         for c in resp["content"]:
                             if isinstance(c, dict):
-                                if c.get("type") == "thinking":
-                                    continue  # skip thinking blocks
-                                if "text" in c:
+                                # Skip extended thinking blocks (they contain reasoning, not answer)
+                                if c.get("type") == "thinking" or "thinking" in c:
+                                    continue
+                                if c.get("type") == "text" and "text" in c:
+                                    texts.append(c["text"])
+                                elif "text" in c and isinstance(c["text"], str):
                                     texts.append(c["text"])
                     elif isinstance(resp["content"], str) and resp["content"].strip():
                         texts.append(resp["content"])
                     elif isinstance(resp["content"], dict):
                         cc = resp["content"]
-                        if cc.get("type") == "text" and "text" in cc:
+                        if cc.get("type") == "thinking" or "thinking" in cc:
+                            pass  # skip thinking
+                        elif cc.get("type") == "text" and "text" in cc:
                             texts.append(cc["text"])
                         elif "text" in cc and isinstance(cc["text"], str):
                             texts.append(cc["text"])
@@ -1056,6 +1062,7 @@ class AIService:
                             "model": model_to_use,
                             "messages": [{"role": "user", "content": request_prompt}],
                             "max_tokens": completion_tokens,
+                            "thinking_budget": 0,  # Disable extended thinking to get direct text response
                         }
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
@@ -1095,9 +1102,6 @@ class AIService:
                                     )
                             return text
                         print(f"[http] returned empty content on attempt {attempt + 1}")
-                        if self.provider == "minimax":
-                            print(f"[minimax] debug response data keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
-                            print(f"[minimax] debug response: {str(data)[:500]}")
                     else:
                         if r.status_code in (429, 502, 503, 504):
                             if self.provider == "groq":
