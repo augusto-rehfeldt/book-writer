@@ -50,6 +50,7 @@ book writer/
   - Google Gemini
   - OpenAI
   - Groq
+  - MiniMax (MiniMax-M2.7)
 
 ## Setup
 
@@ -81,12 +82,14 @@ You can also switch providers by setting `AI_CONFIG_PATH` to one of the other lo
 
 - `ai_book_creator/config/ai_config_openai.local.json`
 - `ai_book_creator/config/ai_config_groq.local.json`
+- `ai_book_creator/config/ai_config_minimax.local.json`
 
 Useful environment variables:
 
 - `GOOGLE_API_KEY`
 - `OPENAI_API_KEY`
 - `GROQ_API_KEY`
+- `MINIMAX_API_KEY`
 - `AI_CONFIG_PATH`
 - `AI_USAGE_STATE_PATH`
 - `AI_GROQ_RATE_STATE_PATH`
