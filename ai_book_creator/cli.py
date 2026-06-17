@@ -8,10 +8,7 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-from .env import load_local_env
-
-load_local_env()
-
+# ponytail: load_local_env() runs once in ai_book_creator/__init__.py on import.
 from .core.book_creator import AIBookCreator
 
 
@@ -29,6 +26,16 @@ PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
 PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
+
+# ponytail: shared by _has_previous_generated_artifacts and _clear_project_output.
+PROJECT_ARTIFACT_PATTERNS = (
+    "project_data.json",
+    "glossary.json",
+    "book_analysis.txt",
+    "book_glossary.txt",
+    "checkpoint_*.json",
+    "chapter_*.txt",
+)
 
 
 def _load_provider_state() -> dict:
@@ -193,15 +200,7 @@ def _has_previous_generated_artifacts() -> bool:
     if _collect_previous_ebooks():
         return True
 
-    patterns = [
-        "project_data.json",
-        "glossary.json",
-        "book_analysis.txt",
-        "book_glossary.txt",
-        "checkpoint_*.json",
-        "chapter_*.txt",
-    ]
-    for pattern in patterns:
+    for pattern in PROJECT_ARTIFACT_PATTERNS:
         if any(PROJECT_OUTPUT_DIR.glob(pattern)):
             return True
     return False
@@ -242,16 +241,8 @@ def _stash_previous_ebooks() -> list[Path]:
 def _clear_project_output() -> None:
     """Remove generated project artifacts so a new run starts cleanly."""
     removed_files: list[str] = []
-    patterns = [
-        "project_data.json",
-        "glossary.json",
-        "book_analysis.txt",
-        "book_glossary.txt",
-        "checkpoint_*.json",
-        "chapter_*.txt",
-    ]
 
-    for pattern in patterns:
+    for pattern in PROJECT_ARTIFACT_PATTERNS:
         for path in PROJECT_OUTPUT_DIR.glob(pattern):
             try:
                 path.unlink()

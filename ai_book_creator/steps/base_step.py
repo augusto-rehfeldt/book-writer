@@ -11,7 +11,9 @@ class BaseStep(ABC):
         self.ai_service = ai_service
         self.project_manager = project_manager
         self.glossary_manager = glossary_manager
-        self.step_name = self.__class__.__name__.lower().replace('step', '')
+        # ponytail: step_name is hardcoded by each subclass; the old derived
+        # value was dead (would have produced wrong keys).
+        self.step_name: str = ""
     
     @abstractmethod
     def execute(self) -> Dict[str, Any]:

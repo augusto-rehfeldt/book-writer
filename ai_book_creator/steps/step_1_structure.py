@@ -508,10 +508,6 @@ class StructureStep(BaseStep):
 
             print(f"Creating plot for Chapter {chapter_number}: {chapter.get('title', f'Chapter {chapter_number}')}")
 
-            glossary_context = ""
-            if self.glossary_manager:
-                glossary_context = self.glossary_manager.get_context_for_writing()
-
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     f"Create a detailed plot outline for Chapter {chapter_number}: "
@@ -526,7 +522,6 @@ class StructureStep(BaseStep):
                     ("Chapter summary", chapter.get("content", "")),
                     ("Opening style tag", chapter.get("opening_style", "")),
                     ("Requirements", "Opening scene; 3-5 key events; character interactions; conflict/tension; chapter ending/transition; emotional beats."),
-                    ("Glossary context", glossary_context),
                     ("Name pools", name_pools_text),
                 ],
                 max_prompt_tokens=7000,
@@ -536,7 +531,6 @@ class StructureStep(BaseStep):
                     "Chapter summary": 1000,
                     "Opening style tag": 60,
                     "Requirements": 250,
-                    "Glossary context": 500,
                     "Name pools": 600,
                 },
             )

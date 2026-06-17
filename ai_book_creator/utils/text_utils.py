@@ -15,15 +15,13 @@ def calculate_page_count(word_count: int, words_per_page: int = WORDS_PER_PAGE) 
     return (word_count + words_per_page - 1) // words_per_page
 
 
-# --- NEW: canonical conversions ---
 def pages_to_words(pages: int) -> int:
     return pages * WORDS_PER_PAGE
 
 
-def words_to_pages(words: int) -> float:
-    return words / WORDS_PER_PAGE
-
-
-# --- NEW: sane token estimation ---
-def estimate_tokens_from_words(words: int) -> int:
-    return int(words * 1.3)
+if __name__ == "__main__":
+    assert calculate_word_count("a b c") == 3
+    assert calculate_page_count(250) == 1
+    assert calculate_page_count(251) == 2
+    assert pages_to_words(2) == 500
+    print("ok")

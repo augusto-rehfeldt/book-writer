@@ -79,14 +79,9 @@ class WriteStep(BaseStep):
                 continue
 
             print(f"\nWriting {chapter_data['title']} (First Draft)...")
-            
-            glossary_context = ""
-            if self.glossary_manager:
-                glossary_context = self.glossary_manager.get_context_for_writing()
-            
+
             prompt = self._build_chapter_prompt(
                 chapter_data,
-                glossary_context,
                 min_words,
                 init_data.get("series_layout_content", ""),
             )
@@ -109,7 +104,7 @@ class WriteStep(BaseStep):
 
             # --- Second Pass AI Edit ---
             improvement_prompt = self._build_chapter_improvement_prompt(
-                text, chapter_data, glossary_context, min_words
+                text, chapter_data, min_words
             )
 
             improved_text = self.ai_service.generate_content(
@@ -187,7 +182,6 @@ class WriteStep(BaseStep):
     def _build_chapter_prompt(
         self,
         chapter_data: Dict[str, Any],
-        glossary_context: str,
         min_words: int,
         series_layout: str = "",
     ) -> str:
@@ -207,8 +201,6 @@ OPENING STYLE TAG: {opening_style}
 PLOT OUTLINE: {chapter_data['plot_outline']}
 
 {series_section}
-
-{glossary_context}
 
 Write at least {min_words} words.
 - Creative, authentic prose
@@ -243,15 +235,12 @@ Output ONLY chapter text, no commentary. Ensure the Chapter Title is prominently
         self,
         draft_text: str,
         chapter_data: Dict[str, Any],
-        glossary_context: str,
         min_words: int
     ) -> str:
         return f"""You are an expert editor and author. Review and improve the following chapter draft.
 
 CHAPTER: {chapter_data['title']}
 PLOT OUTLINE: {chapter_data['plot_outline']}
-
-{glossary_context}
 
 DRAFT TEXT:
 {draft_text}

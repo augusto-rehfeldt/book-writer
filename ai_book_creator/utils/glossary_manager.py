@@ -45,27 +45,19 @@ class GlossaryManager:
         except Exception as e:
             print(f"Error saving glossary: {e}")
     
-    def add_character(self, name: str, description: str):
-        """Add a character to the glossary"""
-        self.glossary["characters"][name] = {
-            "name": name,
-            "description": description
-        }
-    
-    def add_location(self, name: str, description: str):
-        """Add a location to the glossary"""
-        self.glossary["locations"][name] = {
-            "name": name,
-            "description": description
-        }
-    
-    def add_concept(self, name: str, description: str):
-        """Add a concept to the glossary"""
-        self.glossary["concepts"][name] = {
-            "name": name,
-            "description": description
-        }
-    
+    # ponytail: three one-line wrappers kept as the call sites read better.
+    def add_character(self, name: str, description: str) -> None:
+        self._add("characters", name, description)
+
+    def add_location(self, name: str, description: str) -> None:
+        self._add("locations", name, description)
+
+    def add_concept(self, name: str, description: str) -> None:
+        self._add("concepts", name, description)
+
+    def _add(self, category: str, name: str, description: str) -> None:
+        self.glossary[category][name] = {"name": name, "description": description}
+
 
     def update_entry(self, category: str, name: str, updates: Dict[str, Any]):
         """Update an existing glossary entry"""
@@ -196,27 +188,7 @@ Only include truly important elements."""
             "locations": len(self.glossary["locations"]),
             "concepts": len(self.glossary["concepts"])
         }
-    
-    def get_context_for_writing(self, relevant_terms: List[str] = None) -> str:
-        """Get relevant glossary context for writing"""
-        if not relevant_terms:
-            return ""
-        
-        context = "RELEVANT GLOSSARY CONTEXT:\n"
-        
-        for term in relevant_terms:
-            if term in self.glossary["characters"]:
-                char = self.glossary["characters"][term]
-                context += f"• {term}: {char['description']}\n"
-            elif term in self.glossary["locations"]:
-                loc = self.glossary["locations"][term]
-                context += f"• {term}: {loc['description']}\n"
-            elif term in self.glossary["concepts"]:
-                concept = self.glossary["concepts"][term]
-                context += f"• {term}: {concept['description']}\n"
-        
-        return context + "\n"
-    
+
     def set_name_pools(self, pools: Dict[str, List[str]]):
         """Store name pools inside the glossary data."""
         self.glossary["_name_pools"] = pools
