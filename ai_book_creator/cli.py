@@ -7,9 +7,11 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
+from urllib.request import urlopen
 
 # ponytail: load_local_env() runs once in ai_book_creator/__init__.py on import.
 from .core.book_creator import AIBookCreator
+from .services.ai_service import ensure_openai_oauth_proxy
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -18,6 +20,7 @@ REPO_ROOT = PACKAGE_ROOT.parent
 PROVIDER_CONFIG_MAP = {
     "google": str(PACKAGE_ROOT / "config" / "ai_config_google.local.json"),
     "openai": str(PACKAGE_ROOT / "config" / "ai_config_openai.local.json"),
+    "openai-oauth": str(PACKAGE_ROOT / "config" / "ai_config_openai_oauth.json"),
     "groq": str(PACKAGE_ROOT / "config" / "ai_config_groq.local.json"),
     "minimax": str(PACKAGE_ROOT / "config" / "ai_config_minimax.local.json"),
 }
@@ -75,19 +78,24 @@ def _default_openai_model() -> str:
     return "gpt-5.4-mini"
 
 
-def _load_last_openai_model(default_model: str | None = None) -> str:
+def _load_last_openai_model(
+    default_model: str | None = None,
+    options: tuple[str, ...] = OPENAI_MODEL_OPTIONS,
+    state_key: str = "openai_model",
+) -> str:
     data = _load_provider_state()
-    model = str(data.get("openai_model", "")).lower()
-    if model in OPENAI_MODEL_OPTIONS:
+    model = str(data.get(state_key, "")).lower()
+    if model in options:
         return model
-    return default_model or _default_openai_model()
+    fallback = default_model or _default_openai_model()
+    return fallback if fallback in options else options[0]
 
 
 def _save_last_provider(provider: str, openai_model: str | None = None) -> None:
     data = _load_provider_state()
     data["provider"] = provider.lower()
     if openai_model is not None:
-        data["openai_model"] = openai_model.lower()
+        data["openai_oauth_model" if provider.lower() == "openai-oauth" else "openai_model"] = openai_model.lower()
     elif provider.lower() == "openai" and str(data.get("openai_model", "")).lower() not in OPENAI_MODEL_OPTIONS:
         data["openai_model"] = _default_openai_model()
 
@@ -128,11 +136,45 @@ def _normalize_openai_model(choice: str) -> str:
     return aliases.get(normalized, "")
 
 
-def _prompt_openai_model(default_model: str) -> str:
-    prompt = (
-        f"Choose OpenAI model [default: {default_model}] "
-        "(1) gpt-5.4, (2) gpt-5.4-mini: "
-    )
+def _load_openai_oauth_models() -> dict[str, tuple[int | None, int | None]]:
+    ensure_openai_oauth_proxy()
+    with urlopen("http://127.0.0.1:10531/v1/models", timeout=10) as response:
+        payload = json.load(response)
+    models: dict[str, tuple[int | None, int | None]] = {}
+    for item in payload.get("data", []) if isinstance(payload, dict) else []:
+        model_id = str(item.get("id", "")).strip() if isinstance(item, dict) else ""
+        if not model_id or "image" in model_id.lower():
+            continue
+        context = item.get("context_window")
+        output = item.get("max_output_tokens")
+        models[model_id] = (
+            int(context) if isinstance(context, int) and context > 0 else None,
+            int(output) if isinstance(output, int) and output > 0 else None,
+        )
+    if not models:
+        raise RuntimeError("OpenAI OAuth returned no text models from /v1/models.")
+    return models
+
+
+def _prompt_openai_model(
+    default_model: str,
+    model_info: dict[str, tuple[int | None, int | None]] | None = None,
+) -> str:
+    options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
+    print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
+    for index, model in enumerate(options, 1):
+        context, output = model_info.get(model, (None, None)) if model_info is not None else (None, None)
+        limits = []
+        if context:
+            limits.append(f"context {context:,}")
+        if output:
+            limits.append(f"max output {output:,}")
+        detail = f" — {', '.join(limits)}" if limits else ""
+        marker = " (default)" if model == default_model else ""
+        print(f"  {index}. {model}{detail}{marker}")
+    if model_info is not None and not any(context or output for context, output in model_info.values()):
+        print("  Context/output limits: not reported by the OAuth /v1/models endpoint.")
+    prompt = f"Choose model number or id [default: {default_model}]: "
 
     while True:
         try:
@@ -143,10 +185,16 @@ def _prompt_openai_model(default_model: str) -> str:
         if not choice:
             return default_model
 
-        model = _normalize_openai_model(choice)
-        if model in OPENAI_MODEL_OPTIONS:
+        if choice.isdigit() and 1 <= int(choice) <= len(options):
+            return options[int(choice) - 1]
+        model = choice.lower()
+        if model in options:
             return model
-        print("Please choose 1 for gpt-5.4 or 2 for gpt-5.4-mini.")
+        if model_info is None:
+            model = _normalize_openai_model(choice)
+            if model in options:
+                return model
+        print(f"Please choose a number from 1 to {len(options)} or a listed model id.")
 
 
 def _prompt_resume_existing_project() -> bool:
@@ -287,9 +335,15 @@ def run(provider: str) -> None:
     os.environ["AI_CONFIG_PATH"] = config_path
 
     openai_model = None
-    if provider == "openai":
-        default_model = _load_last_openai_model()
-        openai_model = _prompt_openai_model(default_model)
+    if provider in ("openai", "openai-oauth"):
+        model_info = _load_openai_oauth_models() if provider == "openai-oauth" else None
+        options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
+        default_model = _load_last_openai_model(
+            "gpt-5.6-terra" if provider == "openai-oauth" else None,
+            options,
+            "openai_oauth_model" if provider == "openai-oauth" else "openai_model",
+        )
+        openai_model = _prompt_openai_model(default_model, model_info)
         os.environ["AI_WRITING_MODEL"] = openai_model
         os.environ["AI_REVIEW_MODEL"] = openai_model
         os.environ["AI_OPENAI_MODEL"] = openai_model

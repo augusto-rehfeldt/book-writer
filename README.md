@@ -46,9 +46,11 @@ book writer/
 
 - Python 3.12+ recommended
 - Install the packages in `requirements.txt`
+- Node.js with `npx` (only for OpenAI OAuth)
 - API access for whichever provider you want to use:
   - Google Gemini
   - OpenAI
+  - OpenAI OAuth (ChatGPT sign-in; no API key)
   - Groq
   - MiniMax (MiniMax-M2.7)
 
@@ -63,6 +65,13 @@ pip install -r requirements.txt
 ```
 
 The repository already includes local provider config files in `ai_book_creator/config/`. Edit the `.local.json` file for the provider you want to use.
+
+For OpenAI OAuth, run `python main.py` and choose `openai-oauth`. The app starts
+the loopback-only proxy automatically with `npx openai-oauth@latest --detach`,
+opens browser sign-in when needed, and reads the available models live from
+`http://127.0.0.1:10531/v1/models`. `gpt-5.6-terra` is the initial default.
+The proxy currently reports model IDs but not context-window or maximum-output
+metadata, so the selector labels those limits as not reported.
 
 If you want to refresh or recreate local config files, run:
 
@@ -81,6 +90,7 @@ By default, the app now uses the committed local Google config:
 You can also switch providers by setting `AI_CONFIG_PATH` to one of the other local presets:
 
 - `ai_book_creator/config/ai_config_openai.local.json`
+- `ai_book_creator/config/ai_config_openai_oauth.json`
 - `ai_book_creator/config/ai_config_groq.local.json`
 - `ai_book_creator/config/ai_config_minimax.local.json`
 

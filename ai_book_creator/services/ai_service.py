@@ -4,6 +4,9 @@ import json
 import os
 import math
 import re
+import shutil
+import socket
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +40,33 @@ DEFAULT_USAGE_STATE_PATH = os.path.join(
 DEFAULT_GROQ_RATE_STATE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "config", "groq_usage_state.json"
 )
+OPENAI_OAUTH_PORT = 10531
+
+
+def _openai_oauth_proxy_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", OPENAI_OAUTH_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_openai_oauth_proxy() -> None:
+    if _openai_oauth_proxy_running():
+        return
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if not npx:
+        raise RuntimeError("OpenAI OAuth requires Node.js with npx on PATH.")
+    print("Starting the OpenAI OAuth proxy; complete browser sign-in if prompted...")
+    try:
+        subprocess.run([npx, "openai-oauth@latest", "--detach"], check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("OpenAI OAuth proxy failed to start.") from exc
+    for _ in range(40):
+        if _openai_oauth_proxy_running():
+            return
+        time.sleep(0.25)
+    raise RuntimeError(f"OpenAI OAuth proxy did not open port {OPENAI_OAUTH_PORT}.")
 
 
 class UsageLimitExceeded(RuntimeError):
@@ -149,6 +179,8 @@ class AIService:
                 "or update your local override file."
             )
 
+        if self.provider == "openai-oauth":
+            ensure_openai_oauth_proxy()
         self._init_client()
         print("AI Service initialized with provider:", self.provider)
 
@@ -162,6 +194,8 @@ class AIService:
             return None
 
     def _resolve_api_key(self) -> str:
+        if self.provider == "openai-oauth":
+            return "openai-oauth"
         env_key_map = {
             "openai": "OPENAI_API_KEY",
             "groq": "GROQ_API_KEY",
@@ -237,12 +271,13 @@ class AIService:
     def _resolve_base_url(self) -> str:
         default_base_urls = {
             "openai": "https://api.openai.com/v1",
+            "openai-oauth": "http://127.0.0.1:10531/v1",
             "groq": "https://api.groq.com/openai/v1",
         }
         raw_base_url = os.getenv("AI_BASE_URL", self.config.get("base_url", default_base_urls.get(self.provider, "https://api.openai.com/v1")))
         base_url = raw_base_url.rstrip("/")
 
-        if self.provider in ("openai", "groq", "http") and not base_url.endswith("/v1"):
+        if self.provider in ("openai", "openai-oauth", "groq", "http") and not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
 
         return base_url
@@ -747,7 +782,7 @@ class AIService:
         self.client = None
         self.session = None
 
-        if self.provider in ("openai", "groq", "minimax") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider in ("openai", "openai-oauth", "groq", "minimax") and self.use_openai_client and _HAS_OPENAI_CLIENT:
             try:
                 self.client = OpenAI(
                     api_key=self.api_key, base_url=self.base_url
@@ -1051,6 +1086,23 @@ class AIService:
                         return text
                     print(f"[groq_client] returned empty content on attempt {attempt + 1}")
 
+                elif self.client is not None and self.provider == "openai-oauth":
+                    try:
+                        resp = self.client.chat.completions.create(
+                            model=model_to_use,
+                            messages=[{"role": "user", "content": request_prompt}],
+                            max_completion_tokens=completion_tokens,
+                            timeout=self.timeout,
+                        )
+                    except Exception as e:
+                        last_error = e
+                        print(f"[openai-oauth_client] client call failed on attempt {attempt + 1}: {e}")
+                        raise
+                    text = self._extract_text_from_response(resp)
+                    if text and text.strip():
+                        return text
+                    print(f"[openai-oauth_client] returned empty content on attempt {attempt + 1}")
+
                 else:
                     # HTTP endpoint (OpenAI-compatible)
                     if self.session is None:
@@ -1067,6 +1119,13 @@ class AIService:
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"
+                    elif self.provider == "openai-oauth":
+                        payload = {
+                            "model": model_to_use,
+                            "messages": [{"role": "user", "content": request_prompt}],
+                            "max_tokens": completion_tokens,
+                        }
+                        url = self.base_url.rstrip("/") + "/chat/completions"
                     try:
                         r = self.session.post(url, json=payload, timeout=self.timeout)
                     except requests.exceptions.RequestException as e:
