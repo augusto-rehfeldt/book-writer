@@ -82,7 +82,7 @@ Layout: {layout_content[:1500]}
 Series layout: {series_layout[:800] if series_layout else "None"}
 """
     try:
-        response = ai_service.generate_content(prompt, max_completion_tokens=400)
+        response = ai_service.generate_content(prompt, max_completion_tokens=4000)
         # extract JSON list
         match = re.search(r"\[.*\]", response, re.DOTALL)
         if match:
@@ -125,7 +125,7 @@ Rules:
 Return ONLY a JSON list of strings, e.g. ["Aelar", "Brynn", "Caelum", ...]. No extra text.
 """
     try:
-        response = ai_service.generate_content(prompt, max_completion_tokens=2000)
+        response = ai_service.generate_content(prompt, max_completion_tokens=8000)
         match = re.search(r"\[.*\]", response, re.DOTALL)
         if match:
             names = json.loads(match.group())

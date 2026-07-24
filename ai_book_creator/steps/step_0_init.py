@@ -3,12 +3,16 @@ Step 0: Initialize Book - Concept, scope, layout, and character setup
 """
 
 from datetime import datetime
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import math
 import re
 
 from .base_step import BaseStep
-from ..utils.text_utils import pages_to_words
+from ..utils.text_utils import pages_to_words, WORDS_PER_PAGE
+
+# ponytail: drives the chapter-count estimate; override at init if a book needs
+# longer/shorter chapters. Raise to ~4000 for fewer, longer chapters.
+DEFAULT_WORDS_PER_CHAPTER = 3000
 
 
 class InitStep(BaseStep):
@@ -39,6 +43,8 @@ class InitStep(BaseStep):
             series_book_count = existing.get("series_book_count", 1)
             page_count = existing.get("page_count")
             target_word_count = existing.get("target_word_count")
+            chapter_count = existing.get("chapter_count")
+            words_per_chapter = existing.get("words_per_chapter")
             series_layout_content = existing.get("series_layout_content", "")
             proceed_confirmed = existing.get("_proceed_confirmed", False)
             print("\n📂 Resuming from saved initialization data...")
@@ -49,6 +55,8 @@ class InitStep(BaseStep):
             series_book_count = 1
             page_count = None
             target_word_count = None
+            chapter_count = None
+            words_per_chapter = None
             series_layout_content = ""
             proceed_confirmed = False
         
@@ -65,12 +73,18 @@ class InitStep(BaseStep):
         if page_count is None:
             page_count = self._get_page_count(is_series)
             target_word_count = pages_to_words(page_count)
-        
+
+        # 3b. Chapter count (user-validated estimate)
+        if chapter_count is None:
+            chapter_count, words_per_chapter = self._get_chapter_count(target_word_count)
+
         # Token estimate (always show on resume)
         estimate = self._estimate_total_tokens(
             target_word_count=target_word_count,
             series_mode=is_series,
             series_book_count=series_book_count,
+            chapter_count=chapter_count,
+            words_per_chapter=words_per_chapter,
         )
         self._print_token_estimate(estimate, target_word_count, page_count, is_series, series_book_count)
         
@@ -91,6 +105,8 @@ class InitStep(BaseStep):
             "series_book_count": series_book_count,
             "target_word_count": target_word_count,
             "page_count": page_count,
+            "chapter_count": chapter_count,
+            "words_per_chapter": words_per_chapter,
             "_partial": True,
             "_proceed_confirmed": proceed_confirmed
         }
@@ -128,6 +144,8 @@ class InitStep(BaseStep):
             "series_book_count": series_book_count,
             "target_word_count": target_word_count,
             "page_count": page_count,
+            "chapter_count": chapter_count,
+            "words_per_chapter": words_per_chapter,
             "layout_content": layout_content,
             "book_titles": book_titles,
             "timestamp": datetime.now().isoformat()
@@ -192,6 +210,40 @@ class InitStep(BaseStep):
             except ValueError:
                 pass
             print("Enter a valid number")
+
+    def _get_chapter_count(self, target_word_count: int) -> tuple[int, int]:
+        """Show an estimated chapter count and let the user override it.
+
+        Returns (chapter_count, words_per_chapter). The estimate scales with
+        book length off DEFAULT_WORDS_PER_CHAPTER; the user can accept it or
+        type a different count, and words_per_chapter is recomputed.
+        """
+        est = self._estimate_chapter_count(target_word_count)
+        wpc = max(800, target_word_count // est)
+        pages_each = max(1, round(wpc / WORDS_PER_PAGE))
+        print(
+            f"\n📈 Estimated chapters: ~{est} "
+            f"(≈{wpc:,} words per chapter, ~{pages_each} pages each)"
+        )
+        while True:
+            try:
+                raw = input(f"Enter chapter count (Enter to accept ~{est}): ").strip()
+            except (EOFError, StopIteration):
+                return est, wpc
+            if not raw:
+                return est, wpc
+            try:
+                count = int(raw)
+            except ValueError:
+                print("Enter a whole number (>=5) or press Enter to accept the estimate.")
+                continue
+            if count < 5:
+                print("Use at least 5 chapters.")
+                continue
+            wpc_new = max(800, target_word_count // count)
+            pages_new = max(1, round(wpc_new / WORDS_PER_PAGE))
+            print(f"  -> {count} chapters (≈{wpc_new:,} words / ~{pages_new} pages each)")
+            return count, wpc_new
     
     def _generate_series_layout(
         self,
@@ -223,7 +275,7 @@ class InitStep(BaseStep):
                 "Required output": 700,
             },
         )
-        series_layout = self.ai_service.generate_content(prompt, max_completion_tokens=1600)
+        series_layout = self.ai_service.generate_content(prompt, max_completion_tokens=32000)
         print("\n📚 SERIES LAYOUT:")
         print("-" * 50)
         print(series_layout)
@@ -253,7 +305,7 @@ class InitStep(BaseStep):
                 "Series layout context": 1000
             }
         )
-        options_text = self.ai_service.generate_content(prompt, max_completion_tokens=2000)
+        options_text = self.ai_service.generate_content(prompt, max_completion_tokens=32000)
 
         while True:
             print("\n" + "="*50)
@@ -286,7 +338,7 @@ class InitStep(BaseStep):
                         "User Feedback": 500
                     }
                 )
-                options_text = self.ai_service.generate_content(rev_prompt, max_completion_tokens=2000)
+                options_text = self.ai_service.generate_content(rev_prompt, max_completion_tokens=32000)
 
     def _generate_layout(self, book_idea: str, page_count: int, series_layout_content: str = "") -> str:
         # Step 1: Provide multiple options
@@ -310,7 +362,7 @@ class InitStep(BaseStep):
             sections=sections,
             max_prompt_tokens=4000,
         )
-        layout = self.ai_service.generate_content(prompt, max_completion_tokens=1500)
+        layout = self.ai_service.generate_content(prompt, max_completion_tokens=8000)
 
         # Step 2: Interactive review of Layout
         while True:
@@ -337,7 +389,7 @@ class InitStep(BaseStep):
                 sections=rev_sections,
                 max_prompt_tokens=4000
             )
-            layout = self.ai_service.generate_content(rev_prompt, max_completion_tokens=1500)
+            layout = self.ai_service.generate_content(rev_prompt, max_completion_tokens=8000)
 
         return layout
     
@@ -355,15 +407,21 @@ class InitStep(BaseStep):
         return ""
     
     def _estimate_chapter_count(self, target_word_count: int) -> int:
-        return max(20, min(30, math.ceil(max(1, target_word_count) / 1500)))
-    
+        # ponytail: no upper cap — long books get more, shorter chapters.
+        return max(10, math.ceil(max(1, target_word_count) / DEFAULT_WORDS_PER_CHAPTER))
+
     def _estimate_total_tokens(
         self,
         target_word_count: int,
         series_mode: bool,
         series_book_count: int,
+        chapter_count: Optional[int] = None,
+        words_per_chapter: Optional[int] = None,
     ) -> Dict[str, int]:
-        chapter_count = self._estimate_chapter_count(target_word_count)
+        if not chapter_count:
+            chapter_count = self._estimate_chapter_count(target_word_count)
+        if not words_per_chapter:
+            words_per_chapter = max(800, target_word_count // max(1, chapter_count))
         setup_tokens = 3600
         series_layout_tokens = 0
         if series_mode:
@@ -383,6 +441,7 @@ class InitStep(BaseStep):
             "writing_tokens": writing_tokens,
             "review_tokens": review_tokens,
             "chapter_count": chapter_count,
+            "words_per_chapter": words_per_chapter,
             "run_total_tokens": run_total,
             "series_total_tokens": series_total,
         }
@@ -399,7 +458,8 @@ class InitStep(BaseStep):
         if series_mode:
             print(f"Series size: {series_book_count} books")
         print(f"Target length: {target_word_count:,} words per book (about {page_count} pages)")
-        print(f"Estimated chapter count: {estimate['chapter_count']}")
+        print(f"Estimated chapter count: {estimate['chapter_count']} "
+              f"(≈{estimate.get('words_per_chapter', 0):,} words per chapter)")
         print(f"  Setup and layout: {estimate['setup_tokens']:,} tokens")
         if estimate.get("series_layout_tokens", 0):
             print(f"  Series layout: {estimate['series_layout_tokens']:,} tokens")

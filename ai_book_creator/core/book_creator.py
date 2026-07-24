@@ -47,13 +47,13 @@ class AIBookCreator:
         self.glossary_manager = GlossaryManager(self.output_dir)
         
         # Initialize step processors
-        self.steps = {
-            0: InitStep(self.ai_service, self.project_manager),
-            1: StructureStep(self.ai_service, self.project_manager, self.glossary_manager),
-            2: WriteStep(self.ai_service, self.project_manager, self.glossary_manager, self.output_dir),
-            3: ReviewStep(self.ai_service, self.project_manager, self.output_dir),
-            4: EbookStep(self.ai_service, self.project_manager, self.output_dir),
-        }
+        self.steps = [
+            InitStep(self.ai_service, self.project_manager),
+            StructureStep(self.ai_service, self.project_manager, self.glossary_manager),
+            WriteStep(self.ai_service, self.project_manager, self.glossary_manager, self.output_dir),
+            ReviewStep(self.ai_service, self.project_manager, self.output_dir),
+            EbookStep(self.ai_service, self.project_manager, self.output_dir),
+        ]
         
         print("✅ AI Book Creator initialized successfully!")
 
@@ -107,9 +107,7 @@ class AIBookCreator:
             
             try:
                 # Execute each step in sequence
-                for step_num in range(len(self.steps)):
-                    step_processor = self.steps[step_num]
-                    
+                for step_num, step_processor in enumerate(self.steps):
                     if step_processor.should_execute():
                         print(f"\n{step_processor.get_step_header()}")
                         step_processor.execute()

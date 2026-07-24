@@ -221,6 +221,16 @@ class StructureStep(BaseStep):
         layout_content = self._truncate_text(init_data.get("layout_content", ""), 1400 if is_groq else 3500)
         series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900 if is_groq else 1800)
         series_mode = bool(init_data.get("series_mode"))
+        page_count = int(init_data.get("page_count", 400))
+        words_per_page = int(init_data.get("words_per_page", 250))
+        target_word_count = int(init_data.get("target_word_count") or page_count * words_per_page)
+        # User-validated chapter count from Step 0; fall back to ~3000 wpc if absent
+        # (e.g. projects saved before the chapter-count prompt existed).
+        chapter_count = int(init_data.get("chapter_count") or max(10, target_word_count // 3000))
+        words_per_chapter = int(init_data.get("words_per_chapter") or max(1500, target_word_count // chapter_count))
+        per_chapter_target = words_per_chapter
+        chapter_word_low = int(per_chapter_target * 0.9)
+        chapter_word_high = int(per_chapter_target * 1.1)
         opening_style_list = (
             "in medias res, dialogue-led, sensory close-up, object-focused, institutional briefing, "
             "procedural action, quiet reflection, cross-cut, suspense hook"
@@ -247,8 +257,8 @@ class StructureStep(BaseStep):
                         f"{opening_style_list}. "
                         "Keep Summary to 15-20 words after the tag. Keep Key events to at most 3 short phrases "
                         "separated by semicolons. Vary opening style tags across adjacent chapters so the structure "
-                        "feels scene-specific and novelistic. Use 20-24 chapters. Word count must be a single integer "
-                        "like 1400.",
+                        f"feels scene-specific and novelistic. Use exactly {chapter_count} chapters. Word count must be a single integer "
+                        f"around {per_chapter_target} (range {chapter_word_low}-{chapter_word_high}).",
                     ),
                 ],
                 max_prompt_tokens=3000,
@@ -259,12 +269,12 @@ class StructureStep(BaseStep):
                     "Output rules": 260,
                 },
             )
-            return prompt, 1600
+            return prompt, 32000
 
         prompt = self.ai_service.build_sectioned_prompt(
             instruction=(
-                "Create chapter structure from the provided context for the current book. "
-                "Generate 20-30 chapters and return ONLY a plain numbered list."
+                f"Create chapter structure from the provided context for the current book. "
+                f"Generate exactly {chapter_count} chapters and return ONLY a plain numbered list."
             ),
             sections=[
                 ("Book idea", book_idea),
@@ -283,7 +293,8 @@ class StructureStep(BaseStep):
                     "For every chapter, include an opening style tag chosen from: "
                     f"{opening_style_list}. "
                     "Vary the opening style tag from chapter to chapter so adjacent chapters do not feel mechanically similar. "
-                    "Then write a 2-3 sentence summary, key events, and a word count estimate of 1200-1500 words. "
+                    f"Then write a 2-3 sentence summary, key events, and a word count estimate of "
+                    f"{chapter_word_low}-{chapter_word_high} words. "
                     "Keep the chapter openings specific, concrete, and distinct in tone and sentence shape.",
                 ),
             ],
@@ -295,7 +306,7 @@ class StructureStep(BaseStep):
                 "Output rules": 450,
             },
         )
-        return prompt, 4096
+        return prompt, 32000
     
     def _extract_chapters(self, content: str) -> List[Dict]:
         chapters = []

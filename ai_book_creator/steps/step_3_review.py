@@ -164,7 +164,7 @@ class ReviewStep(BaseStep):
             for chapter_key, chapter in chapters_content.items():
                 chapter_plot = self.project_manager.get_chapter_plot(chapter.chapter_number)
                 baseline_estimate = chapter_plot.get("word_count_estimate", 1500) if chapter_plot else 1500
-                expansion_ceiling = int(baseline_estimate * 1.6)
+                expansion_ceiling = int(baseline_estimate * 2.0)
                 if chapter.word_count >= expansion_ceiling:
                     continue
 
@@ -326,7 +326,7 @@ class ReviewStep(BaseStep):
         return self.ai_service.generate_content(
             prompt,
             model_type="writing",
-            max_completion_tokens=2048,
+            max_completion_tokens=16384,
         )
 
     def _generate_analysis(self, init_data: Dict, full_text: str) -> str:

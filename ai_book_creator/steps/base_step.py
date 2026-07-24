@@ -1,12 +1,11 @@
 """
-Base Step class - defines the interface for all book creation steps
+Base Step class for shared book creation step helpers.
 """
 
-from abc import ABC, abstractmethod
 from typing import Dict, Any
 
 
-class BaseStep(ABC):
+class BaseStep:
     def __init__(self, ai_service, project_manager, glossary_manager=None):
         self.ai_service = ai_service
         self.project_manager = project_manager
@@ -15,20 +14,17 @@ class BaseStep(ABC):
         # value was dead (would have produced wrong keys).
         self.step_name: str = ""
     
-    @abstractmethod
     def execute(self) -> Dict[str, Any]:
         """Execute the step and return the result"""
-        pass
+        raise NotImplementedError
     
-    @abstractmethod
     def should_execute(self) -> bool:
         """Check if this step needs to be executed"""
-        pass
+        raise NotImplementedError
     
-    @abstractmethod
     def get_step_header(self) -> str:
         """Get the formatted header for this step"""
-        pass
+        raise NotImplementedError
     
     def get_step_data(self) -> Dict[str, Any]:
         """Get existing data for this step"""

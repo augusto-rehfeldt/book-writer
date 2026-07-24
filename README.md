@@ -45,12 +45,16 @@ book writer/
 ## Requirements
 
 - Python 3.12+ recommended
+- Node.js with `npx` (only for OpenAI OAuth)
 - Install the packages in `requirements.txt`
 - API access for whichever provider you want to use:
   - Google Gemini
   - OpenAI
+  - OpenAI OAuth (local ChatGPT-account proxy)
   - Groq
   - MiniMax (MiniMax-M2.7)
+  - OpenRouter
+  - OpenCode Go
 
 ## Setup
 
@@ -61,6 +65,15 @@ python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
 ```
+
+Run `python main.py` and choose `openai-oauth`. The app starts the loopback-only
+proxy automatically; on first use, `npx` may ask to download it and a browser
+may open for sign-in. No OpenAI API key is required. The proxy reuses the local
+Codex credentials in `~/.codex`. The model menu is loaded live from the proxy;
+its `/v1/models` endpoint currently does not report context or output limits.
+
+For OpenCode Go, run `opencode auth login` first, then choose `opencode-go`.
+The app reads the current credentials and model limits from OpenCode's local files.
 
 The repository already includes local provider config files in `ai_book_creator/config/`. Edit the `.local.json` file for the provider you want to use.
 
@@ -81,8 +94,11 @@ By default, the app now uses the committed local Google config:
 You can also switch providers by setting `AI_CONFIG_PATH` to one of the other local presets:
 
 - `ai_book_creator/config/ai_config_openai.local.json`
+- `ai_book_creator/config/ai_config_openai_oauth.json`
 - `ai_book_creator/config/ai_config_groq.local.json`
 - `ai_book_creator/config/ai_config_minimax.local.json`
+- `ai_book_creator/config/ai_config_openrouter.json`
+- `ai_book_creator/config/ai_config_opencode_go.json`
 
 Useful environment variables:
 
@@ -90,6 +106,8 @@ Useful environment variables:
 - `OPENAI_API_KEY`
 - `GROQ_API_KEY`
 - `MINIMAX_API_KEY`
+- `OPENROUTER_API_KEY`
+- `OPENCODE_GO_API_KEY`
 - `AI_CONFIG_PATH`
 - `AI_USAGE_STATE_PATH`
 - `AI_GROQ_RATE_STATE_PATH`

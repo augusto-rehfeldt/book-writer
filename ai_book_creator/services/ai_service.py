@@ -4,6 +4,9 @@ import json
 import os
 import math
 import re
+import shutil
+import socket
+import subprocess
 import time
 from datetime import datetime
 from pathlib import Path
@@ -37,6 +40,69 @@ DEFAULT_USAGE_STATE_PATH = os.path.join(
 DEFAULT_GROQ_RATE_STATE_PATH = os.path.join(
     os.path.dirname(__file__), "..", "config", "groq_usage_state.json"
 )
+OPENAI_OAUTH_PORT = 10531
+
+
+def _openai_oauth_proxy_running() -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", OPENAI_OAUTH_PORT), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+
+def ensure_openai_oauth_proxy() -> None:
+    if _openai_oauth_proxy_running():
+        return
+    npx = shutil.which("npx.cmd") or shutil.which("npx")
+    if not npx:
+        raise RuntimeError("OpenAI OAuth requires Node.js with npx on PATH.")
+    print("Starting the OpenAI OAuth proxy; complete browser sign-in if prompted...")
+    try:
+        subprocess.run([npx, "openai-oauth@latest", "--detach"], check=True)
+    except subprocess.CalledProcessError as exc:
+        raise RuntimeError("OpenAI OAuth proxy failed to start.") from exc
+    for _ in range(40):
+        if _openai_oauth_proxy_running():
+            return
+        time.sleep(0.25)
+    raise RuntimeError(f"OpenAI OAuth proxy did not open port {OPENAI_OAUTH_PORT}.")
+
+# ponytail: live-read opencode's userspace truth so our .env / ai_config stays in sync.
+# Both are single-file JSON written by the opencode CLI on `opencode auth login`.
+OPENCODE_USER_CONFIG = Path.home() / ".config" / "opencode" / "opencode.jsonc"
+OPENCODE_USER_AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+
+
+def load_opencode_go_sync() -> Dict[str, Any]:
+    """Read opencode-go API key + per-model context/output limits from opencode's
+    own userspace files. Returns {"api_key": str, "models": {mid_lower: {...}}};
+    missing fields are silently skipped, so callers can use it as best-effort."""
+    out: Dict[str, Any] = {"api_key": "", "models": {}}
+    try:
+        if OPENCODE_USER_AUTH.exists():
+            auth = json.loads(OPENCODE_USER_AUTH.read_text(encoding="utf-8"))
+            entry = auth.get("opencode-go", {}) if isinstance(auth, dict) else {}
+            if isinstance(entry, dict) and entry.get("type") == "api":
+                out["api_key"] = str(entry.get("key", "") or "")
+    except Exception:
+        pass
+    try:
+        if OPENCODE_USER_CONFIG.exists():
+            cfg = json.loads(OPENCODE_USER_CONFIG.read_text(encoding="utf-8"))
+            providers = cfg.get("provider", {}) if isinstance(cfg, dict) else {}
+            ocgo = providers.get("opencode-go", {}) if isinstance(providers, dict) else {}
+            for mid, info in (ocgo.get("models", {}) or {}).items():
+                if isinstance(info, dict):
+                    limit = info.get("limit", {}) or {}
+                    out["models"][str(mid).strip().lower()] = {
+                        "name": str(mid),
+                        "max_output": int(limit.get("output", 4096) or 4096),
+                        "context": int(limit.get("context", 0) or 0),
+                    }
+    except Exception:
+        pass
+    return out
 
 
 class UsageLimitExceeded(RuntimeError):
@@ -145,10 +211,12 @@ class AIService:
         if not self.api_key and self.provider != "http":
             print(
                 "Warning: No API key provided. Set the provider-specific env var "
-                "(OPENAI_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY, or AI_API_KEY) "
+                "(OPENAI_API_KEY, GROQ_API_KEY, GOOGLE_API_KEY, OPENROUTER_API_KEY, or AI_API_KEY) "
                 "or update your local override file."
             )
 
+        if self.provider == "openai-oauth":
+            ensure_openai_oauth_proxy()
         self._init_client()
         print("AI Service initialized with provider:", self.provider)
 
@@ -162,10 +230,13 @@ class AIService:
             return None
 
     def _resolve_api_key(self) -> str:
+        if self.provider == "openai-oauth":
+            return "openai-oauth"
         env_key_map = {
             "openai": "OPENAI_API_KEY",
             "groq": "GROQ_API_KEY",
             "google": "GOOGLE_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
         }
         provider_env = str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
         candidates = [
@@ -175,8 +246,13 @@ class AIService:
             os.getenv("GROQ_API_KEY", ""),
             os.getenv("GOOGLE_API_KEY", ""),
             os.getenv("MINIMAX_API_KEY", ""),
+            os.getenv("OPENROUTER_API_KEY", ""),
             self.config.get("api_key", ""),
         ]
+        # ponytail: when targeting opencode-go, prefer opencode's live auth.json
+        # so a re-login in the opencode CLI automatically refreshes our key.
+        if provider_env == "OPENCODE_GO_API_KEY":
+            candidates.insert(0, load_opencode_go_sync().get("api_key", ""))
         for candidate in candidates:
             if candidate:
                 return candidate
@@ -188,6 +264,7 @@ class AIService:
             "groq": "GROQ_API_KEY",
             "google": "GOOGLE_API_KEY",
             "minimax": "MINIMAX_API_KEY",
+            "openrouter": "OPENROUTER_API_KEY",
         }
         return str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
 
@@ -237,12 +314,14 @@ class AIService:
     def _resolve_base_url(self) -> str:
         default_base_urls = {
             "openai": "https://api.openai.com/v1",
+            "openai-oauth": "http://127.0.0.1:10531/v1",
             "groq": "https://api.groq.com/openai/v1",
+            "openrouter": "https://openrouter.ai/api/v1",
         }
         raw_base_url = os.getenv("AI_BASE_URL", self.config.get("base_url", default_base_urls.get(self.provider, "https://api.openai.com/v1")))
         base_url = raw_base_url.rstrip("/")
 
-        if self.provider in ("openai", "groq", "http") and not base_url.endswith("/v1"):
+        if self.provider in ("openai", "openai-oauth", "groq", "http", "openrouter") and not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
 
         return base_url
@@ -747,11 +826,14 @@ class AIService:
         self.client = None
         self.session = None
 
-        if self.provider in ("openai", "groq", "minimax") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter") and self.use_openai_client and _HAS_OPENAI_CLIENT:
             try:
-                self.client = OpenAI(
-                    api_key=self.api_key, base_url=self.base_url
-                )
+                kwargs = {"api_key": self.api_key, "base_url": self.base_url}
+                if self.provider == "openrouter":
+                    headers = self.config.get("headers")
+                    if isinstance(headers, dict):
+                        kwargs["default_headers"] = headers
+                self.client = OpenAI(**kwargs)
                 if self.provider == "groq":
                     print("Using OpenAI-compatible client for Groq")
                 else:
@@ -776,6 +858,9 @@ class AIService:
                 "Authorization": f"Bearer {self.api_key}",
             }
         )
+        headers = self.config.get("headers")
+        if isinstance(headers, dict):
+            self.session.headers.update(headers)
         print("Using HTTP session for requests to:", self.base_url)
 
     def _extract_text_from_response(self, resp: Any) -> str:
@@ -902,6 +987,17 @@ class AIService:
         return result
 
     def _default_completion_tokens(self, model_type: str) -> int:
+        env_key = {
+            "writing": "AI_WRITING_COMPLETION_TOKENS",
+            "review": "AI_REVIEW_COMPLETION_TOKENS",
+            "planning": "AI_PLANNING_COMPLETION_TOKENS",
+        }.get(model_type, "AI_DEFAULT_COMPLETION_TOKENS")
+        env_val = os.getenv(env_key)
+        if env_val:
+            try:
+                return max(256, int(env_val))
+            except ValueError:
+                pass
         if self.provider == "groq":
             defaults = {
                 "writing": int(self.config.get("groq_writing_completion_tokens", 3072)),
@@ -924,7 +1020,7 @@ class AIService:
         max_retries: int = 5,
         max_completion_tokens: Optional[int] = None,
     ) -> str:
-        retry_delays = [1, 2, 4, 8, 16]
+        retry_delays = [3, 8, 20, 45, 90]
         attempt = 0
         last_error = None
         request_prompt = prompt
@@ -1051,6 +1147,28 @@ class AIService:
                         return text
                     print(f"[groq_client] returned empty content on attempt {attempt + 1}")
 
+                elif self.client is not None and self.provider in ("openai-oauth", "openrouter"):
+                    try:
+                        resp = self.client.chat.completions.create(
+                            model=model_to_use,
+                            messages=[{"role": "user", "content": request_prompt}],
+                            max_completion_tokens=completion_tokens,
+                            timeout=self.timeout,
+                        )
+                    except Exception as e:
+                        last_error = e
+                        print(f"[{self.provider}_client] client call failed on attempt {attempt + 1}: {e}")
+                        raise
+                    text = self._extract_text_from_response(resp)
+                    if text and text.strip():
+                        return text
+                    finish_reason = None
+                    try:
+                        finish_reason = resp.choices[0].finish_reason
+                    except Exception:
+                        pass
+                    print(f"[{self.provider}_client] returned empty content on attempt {attempt + 1} (finish_reason={finish_reason})")
+
                 else:
                     # HTTP endpoint (OpenAI-compatible)
                     if self.session is None:
@@ -1067,6 +1185,13 @@ class AIService:
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"
+                    elif self.provider in ("openai-oauth", "openrouter"):
+                        payload = {
+                            "model": model_to_use,
+                            "messages": [{"role": "user", "content": request_prompt}],
+                            "max_tokens": completion_tokens,
+                        }
+                        url = self.base_url.rstrip("/") + "/chat/completions"
                     try:
                         r = self.session.post(url, json=payload, timeout=self.timeout)
                     except requests.exceptions.RequestException as e:
@@ -1191,3 +1316,20 @@ class AIService:
             print("Last error:", last_error)
             raise last_error
         raise RuntimeError("CRITICAL ERROR: Failed to generate content after all retries")
+
+
+if __name__ == "__main__":
+    # ponytail: self-check — print the live opencode-go sync; asserts that the
+    # shape matches what _resolve_api_key and cli._load_opencode_go_models expect.
+    sync = load_opencode_go_sync()
+    print(
+        "opencode-go sync:",
+        f"key={'present' if sync['api_key'] else 'missing'}, models={len(sync['models'])}",
+    )
+    assert "api_key" in sync and isinstance(sync["api_key"], str), "api_key missing/wrong type"
+    assert isinstance(sync["models"], dict), "models missing/wrong type"
+    for mid, info in sync["models"].items():
+        assert isinstance(mid, str) and mid == mid.lower(), f"model id not lowercased: {mid!r}"
+        assert "max_output" in info and isinstance(info["max_output"], int), f"{mid}: max_output bad"
+        assert "context" in info and isinstance(info["context"], int), f"{mid}: context bad"
+    print("ok")

@@ -69,7 +69,12 @@ class WriteStep(BaseStep):
                 total_word_count += int(chapter_info.get("word_count", 0))
         
         chapter_plots = structure_data.get("chapter_plots", {})
-        min_words = self.config.get("min_chapter_words", 1000)
+        config_min_words = self.config.get("min_chapter_words", 1000)
+        init_page_count = int(init_data.get("page_count", 400))
+        init_words_per_page = int(init_data.get("words_per_page", 250))
+        init_target_words = int(init_data.get("target_word_count") or init_page_count * init_words_per_page)
+        chapter_count = len(chapter_plots) or 25
+        scaled_min = max(config_min_words, init_target_words // chapter_count)
         
         for chapter_key, chapter_data in chapter_plots.items():
             existing_chapter = written_chapters.get(chapter_key)
@@ -80,6 +85,7 @@ class WriteStep(BaseStep):
 
             print(f"\nWriting {chapter_data['title']} (First Draft)...")
 
+            min_words = max(scaled_min, int(chapter_data.get("word_count_estimate", scaled_min)))
             prompt = self._build_chapter_prompt(
                 chapter_data,
                 min_words,
@@ -90,7 +96,6 @@ class WriteStep(BaseStep):
             text = self.ai_service.generate_content(
                 prompt,
                 model_type="writing",
-                max_completion_tokens=4096,
             )
 
             if not text.strip():
@@ -110,7 +115,6 @@ class WriteStep(BaseStep):
             improved_text = self.ai_service.generate_content(
                 improvement_prompt,
                 model_type="writing",
-                max_completion_tokens=4096,
             )
 
             if improved_text.strip():
