@@ -292,7 +292,7 @@ def _prompt_resume_existing_project() -> bool:
 
 
 def _prompt_stash_previous_ebooks() -> bool:
-    prompt = "Stash existing EPUBs before starting fresh? [Y/n]: "
+    prompt = "Stash existing EPUBs and cover prompts before starting fresh? [Y/n]: "
     while True:
         try:
             choice = input(prompt).strip().lower()
@@ -306,24 +306,24 @@ def _prompt_stash_previous_ebooks() -> bool:
         print("Please answer yes or no.")
 
 
-def _collect_previous_ebooks() -> list[Path]:
+def _collect_previous_ebook_files() -> list[Path]:
     if not PROJECT_OUTPUT_DIR.exists():
         return []
 
-    ebooks: list[Path] = []
-    for path in PROJECT_OUTPUT_DIR.rglob("*.epub"):
-        try:
-            relative = path.relative_to(PROJECT_OUTPUT_DIR)
-        except ValueError:
-            continue
-        if "archive" in relative.parts:
-            continue
-        ebooks.append(path)
-    return ebooks
+    files: list[Path] = []
+    for pattern in ("*.epub", "*_cover_prompt.txt"):
+        for path in PROJECT_OUTPUT_DIR.rglob(pattern):
+            try:
+                relative = path.relative_to(PROJECT_OUTPUT_DIR)
+            except ValueError:
+                continue
+            if "archive" not in relative.parts:
+                files.append(path)
+    return files
 
 
 def _has_previous_generated_artifacts() -> bool:
-    if _collect_previous_ebooks():
+    if _collect_previous_ebook_files():
         return True
 
     for pattern in PROJECT_ARTIFACT_PATTERNS:
@@ -347,9 +347,9 @@ def _unique_target_path(directory: Path, filename: str) -> Path:
         index += 1
 
 
-def _stash_previous_ebooks() -> list[Path]:
-    ebooks = _collect_previous_ebooks()
-    if not ebooks:
+def _stash_previous_ebook_files() -> list[Path]:
+    files = _collect_previous_ebook_files()
+    if not files:
         return []
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -357,9 +357,9 @@ def _stash_previous_ebooks() -> list[Path]:
     stash_dir.mkdir(parents=True, exist_ok=True)
 
     moved: list[Path] = []
-    for ebook_path in ebooks:
-        target = _unique_target_path(stash_dir, ebook_path.name)
-        shutil.move(str(ebook_path), str(target))
+    for path in files:
+        target = _unique_target_path(stash_dir, path.name)
+        shutil.move(str(path), str(target))
         moved.append(target)
     return moved
 
@@ -385,13 +385,13 @@ def _clear_project_output() -> None:
 
 
 def _prepare_fresh_start() -> None:
-    """Offer to archive old EPUBs, then clear cached project artifacts."""
-    previous_ebooks = _collect_previous_ebooks()
-    if previous_ebooks:
+    """Offer to archive old ebook files, then clear cached project artifacts."""
+    previous_ebook_files = _collect_previous_ebook_files()
+    if previous_ebook_files:
         if _prompt_stash_previous_ebooks():
-            moved = _stash_previous_ebooks()
+            moved = _stash_previous_ebook_files()
             if moved:
-                print("Archived previous EPUBs:")
+                print("Archived previous ebook files:")
                 for path in moved:
                     print(f"  - {path}")
         else:
