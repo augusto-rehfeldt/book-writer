@@ -90,7 +90,7 @@ class InitStep(BaseStep):
         
         # Confirmation
         if not proceed_confirmed:
-            choice = input("\nProceed with generation? (y/n): ").strip().lower()
+            choice = input("\nProceed with generation? (Y/n): ").strip().lower() or "y"
             if choice not in ('y', 'yes'):
                 print("Generation aborted.")
                 import sys
