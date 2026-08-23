@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import re
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -25,7 +27,12 @@ PROVIDER_CONFIG_MAP = {
     "minimax": str(PACKAGE_ROOT / "config" / "ai_config_minimax.local.json"),
     "openrouter": str(PACKAGE_ROOT / "config" / "ai_config_openrouter.json"),
     "opencode-go": str(PACKAGE_ROOT / "config" / "ai_config_opencode_go.json"),
+    "opencode-zen": str(PACKAGE_ROOT / "config" / "ai_config_opencode_zen.json"),
+    "claude": str(PACKAGE_ROOT / "config" / "ai_config_claude.json"),
+    "hyper": str(PACKAGE_ROOT / "config" / "ai_config_hyper.json"),
 }
+# Providers whose model list lives in their config file and is picked at runtime.
+CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "hyper")
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
@@ -33,29 +40,50 @@ PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
 
 
-def _load_opencode_go_models() -> dict:
+def _load_catalogue(provider: str) -> dict:
     # Local config first (carries friendly display names like "GLM-5.2").
     out: dict = {}
     try:
-        with open(PROVIDER_CONFIG_MAP["opencode-go"], "r", encoding="utf-8") as f:
+        with open(PROVIDER_CONFIG_MAP[provider], "r", encoding="utf-8") as f:
             data = json.load(f)
         for mid, info in (data.get("models") or {}).items():
             out[str(mid).lower()] = [str(info.get("name", mid)), int(info.get("max_output", 4096))]
     except Exception:
         pass
-    # Then overlay opencode's userspace truth so context/output stays fresh.
+    # Then overlay opencode's userspace truth so context/output stays fresh
+    # for the paid opencode-go tier; the zen config already lists its free tier.
     # ponytail: opencode auth.json also drives the key; this keeps the two in lockstep.
-    for mid, info in load_opencode_go_sync().get("models", {}).items():
-        if mid in out:
-            out[mid][1] = int(info["max_output"])
-        else:
-            out[mid] = [info.get("name", mid), int(info["max_output"])]
+    if provider == "opencode-go":
+        synced = load_opencode_go_sync().get("models", {})
+        for mid, info in synced.items():
+            if mid in out:
+                out[mid][1] = int(info["max_output"])
+            else:
+                out[mid] = [info.get("name", mid), int(info["max_output"])]
+        if synced:
+            out = {mid: entry for mid, entry in out.items() if mid in synced}
     if not out:
-        out = {"glm-5.2": ["GLM-5.2", 131072]}
+        fallback = (
+            {"deepseek-v4-flash-free": ["DeepSeek V4 Flash Free", 128000]}
+            if provider == "opencode-zen"
+            else {"glm-5.2": ["GLM-5.2", 131072]}
+        )
+        out = fallback
     return out
 
 
-OPENCODE_GO_MODELS = _load_opencode_go_models()
+_CATALOGUE_CACHE: dict[str, dict] = {}
+
+
+def _provider_models(provider: str) -> dict:
+    """{model id: [display name, max output tokens]} for a catalogue provider."""
+    if provider not in _CATALOGUE_CACHE:
+        _CATALOGUE_CACHE[provider] = _load_catalogue(provider)
+    return _CATALOGUE_CACHE[provider]
+
+
+def _model_state_key(provider: str) -> str:
+    return f"{provider.replace('-', '_')}_model"
 
 # ponytail: shared by _has_previous_generated_artifacts and _clear_project_output.
 PROJECT_ARTIFACT_PATTERNS = (
@@ -118,17 +146,22 @@ def _load_last_openai_model(
     return fallback if fallback in options else options[0]
 
 
-def _save_last_provider(provider: str, openai_model: str | None = None, opencode_go_model: str | None = None) -> None:
+def _save_last_provider(provider: str, openai_model: str | None = None,
+                        catalogue_model: str | None = None) -> None:
     data = _load_provider_state()
-    data["provider"] = provider.lower()
+    provider = provider.lower()
+    data["provider"] = provider
     if openai_model is not None:
-        data["openai_oauth_model" if provider.lower() == "openai-oauth" else "openai_model"] = openai_model.lower()
-    elif provider.lower() == "openai" and str(data.get("openai_model", "")).lower() not in OPENAI_MODEL_OPTIONS:
+        data["openai_oauth_model" if provider == "openai-oauth" else "openai_model"] = openai_model.lower()
+    elif provider == "openai" and str(data.get("openai_model", "")).lower() not in OPENAI_MODEL_OPTIONS:
         data["openai_model"] = _default_openai_model()
-    if opencode_go_model is not None:
-        data["opencode_go_model"] = opencode_go_model.lower()
-    elif provider.lower() == "opencode-go" and str(data.get("opencode_go_model", "")).lower() not in OPENCODE_GO_MODELS:
-        data["opencode_go_model"] = next(iter(OPENCODE_GO_MODELS))
+    if provider in CATALOGUE_PROVIDERS:
+        key = _model_state_key(provider)
+        models = _provider_models(provider)
+        if catalogue_model is not None:
+            data[key] = catalogue_model.lower()
+        elif str(data.get(key, "")).lower() not in models:
+            data[key] = next(iter(models))
 
     PROVIDER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
     with PROVIDER_STATE_FILE.open("w", encoding="utf-8") as f:
@@ -228,32 +261,44 @@ def _prompt_openai_model(
         print(f"Please choose a number from 1 to {len(options)} or a listed model id.")
 
 
-def _default_opencode_go_model() -> str:
+def _default_catalogue_model(provider: str) -> str:
+    models = _provider_models(provider)
     try:
-        with open(PROVIDER_CONFIG_MAP["opencode-go"], "r", encoding="utf-8") as f:
+        with open(PROVIDER_CONFIG_MAP[provider], "r", encoding="utf-8") as f:
             data = json.load(f)
         if isinstance(data, dict):
             candidate = str(data.get("writing_model") or "").lower()
-            if candidate in OPENCODE_GO_MODELS:
+            if candidate in models:
                 return candidate
     except Exception:
         pass
-    return next(iter(OPENCODE_GO_MODELS))
+    return next(iter(models))
 
 
-def _load_last_opencode_go_model(default_model: str | None = None) -> str:
+def _load_last_catalogue_model(provider: str, default_model: str | None = None) -> str:
+    models = _provider_models(provider)
     data = _load_provider_state()
-    model = str(data.get("opencode_go_model", "")).lower()
-    if model in OPENCODE_GO_MODELS:
+    model = str(data.get(_model_state_key(provider), "")).lower()
+    if model in models:
         return model
-    return default_model or _default_opencode_go_model()
+    return default_model or _default_catalogue_model(provider)
 
 
-def _prompt_opencode_go_model(default_model: str) -> str:
-    model_ids = list(OPENCODE_GO_MODELS.keys())
-    print("Available OpenCode Go models:")
+PROVIDER_LABELS = {
+    "opencode-go": "OpenCode Go",
+    "opencode-zen": "OpenCode Zen free",
+    "claude": "Claude Code (your subscription, no API key)",
+    "hyper": "hyper.charm.land",
+}
+
+
+def _prompt_catalogue_model(provider: str, default_model: str) -> str:
+    models = _provider_models(provider)
+    label = PROVIDER_LABELS.get(provider, provider)
+    model_ids = list(models.keys())
+    print(f"Available {label} models:")
     for i, mid in enumerate(model_ids, 1):
-        name, max_out = OPENCODE_GO_MODELS[mid]
+        name, max_out = models[mid]
         marker = " (default)" if mid == default_model else ""
         print(f"  {i:2d}. {mid} — {name} (max output {max_out:,}){marker}")
     prompt = f"Choose model number or id [default: {default_model}]: "
@@ -266,7 +311,7 @@ def _prompt_opencode_go_model(default_model: str) -> str:
 
         if not choice:
             return default_model
-        if choice in OPENCODE_GO_MODELS:
+        if choice in models:
             return choice
         if choice.isdigit():
             idx = int(choice)
@@ -311,7 +356,7 @@ def _collect_previous_ebook_files() -> list[Path]:
         return []
 
     files: list[Path] = []
-    for pattern in ("*.epub", "*_cover_prompt.txt"):
+    for pattern in ("*.epub", "*_cover_prompt.txt", "*_cover.jpg", "*_kdp.json", "*_KDP_CHECKLIST.txt"):
         for path in PROJECT_OUTPUT_DIR.rglob(pattern):
             try:
                 relative = path.relative_to(PROJECT_OUTPUT_DIR)
@@ -400,7 +445,14 @@ def _prepare_fresh_start() -> None:
     _clear_project_output()
 
 
-def run(provider: str) -> None:
+def run(
+    provider: str,
+    mode: str = "review",
+    fresh: bool = False,
+    continuous: bool = False,
+    publish_kdp: bool = False,
+    kdp_visible: bool = False,
+) -> bool:
     base_config_path = Path(PROVIDER_CONFIG_MAP[provider])
     local_config_path = base_config_path.with_name(base_config_path.stem + ".local.json")
     
@@ -413,7 +465,7 @@ def run(provider: str) -> None:
     os.environ["AI_CONFIG_PATH"] = config_path
 
     openai_model = None
-    opencode_go_model = None
+    catalogue_model = None
     if provider in ("openai", "openai-oauth"):
         model_info = _load_openai_oauth_models() if provider == "openai-oauth" else None
         options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
@@ -422,36 +474,120 @@ def run(provider: str) -> None:
             options,
             "openai_oauth_model" if provider == "openai-oauth" else "openai_model",
         )
-        openai_model = _prompt_openai_model(default_model, model_info)
+        openai_model = default_model if mode == "auto" else _prompt_openai_model(default_model, model_info)
         os.environ["AI_WRITING_MODEL"] = openai_model
         os.environ["AI_REVIEW_MODEL"] = openai_model
         os.environ["AI_OPENAI_MODEL"] = openai_model
-    elif provider == "opencode-go":
-        default_model = _load_last_opencode_go_model()
-        opencode_go_model = _prompt_opencode_go_model(default_model)
-        _, max_out = OPENCODE_GO_MODELS[opencode_go_model]
-        os.environ["AI_WRITING_MODEL"] = opencode_go_model
-        os.environ["AI_REVIEW_MODEL"] = opencode_go_model
+    elif provider in CATALOGUE_PROVIDERS:
+        default_model = _load_last_catalogue_model(provider)
+        catalogue_model = default_model if mode == "auto" else _prompt_catalogue_model(provider, default_model)
+        _, max_out = _provider_models(provider)[catalogue_model]
+        os.environ["AI_WRITING_MODEL"] = catalogue_model
+        os.environ["AI_REVIEW_MODEL"] = catalogue_model
+        # The Claude Code CLI has no completion-token argument, so its catalogue
+        # carries max_output 0 and the caps stay unset.
         for key in (
             "AI_WRITING_COMPLETION_TOKENS",
             "AI_REVIEW_COMPLETION_TOKENS",
             "AI_PLANNING_COMPLETION_TOKENS",
             "AI_DEFAULT_COMPLETION_TOKENS",
         ):
-            os.environ[key] = str(max_out)
+            if max_out:
+                os.environ[key] = str(max_out)
+            else:
+                os.environ.pop(key, None)
 
-    _save_last_provider(provider, openai_model, opencode_go_model)
+    _save_last_provider(provider, openai_model, catalogue_model)
 
-    if PROJECT_STATE_FILE.exists():
-        if _prompt_resume_existing_project():
+    if fresh:
+        if mode == "auto":
+            _stash_previous_ebook_files()
+            _clear_project_output()
+        else:
+            _prepare_fresh_start()
+    elif PROJECT_STATE_FILE.exists():
+        if mode == "auto":
+            print("Resuming existing project.")
+        elif _prompt_resume_existing_project():
             print("Resuming existing project.")
         else:
             _prepare_fresh_start()
     elif _has_previous_generated_artifacts():
-        _prepare_fresh_start()
+        if mode == "auto":
+            _stash_previous_ebook_files()
+            _clear_project_output()
+        else:
+            _prepare_fresh_start()
 
-    creator = AIBookCreator()
-    creator.create_book()
+    while True:
+        creator = AIBookCreator()
+        completed = creator.create_book()
+        if completed and publish_kdp:
+            from .utils.kdp_publisher import publish_package
+
+            publishing = creator.project_manager.get_step_data("publishing")
+            try:
+                publish_package(
+                    publishing["package_file"],
+                    headless=not kdp_visible,
+                    ai_service=creator.ai_service,
+                )
+            except Exception as exc:
+                print(f"KDP publishing deferred; saved draft will remain ready to resume: {exc}")
+        if not continuous or not completed:
+            return completed
+
+        moved = _stash_previous_ebook_files()
+        if moved:
+            print(f"Archived completed KDP package to: {moved[0].parent}")
+        _clear_project_output()
+        print("\nContinuous mode: starting the next book.")
+
+
+def _range_arg(value: str) -> str:
+    if not re.fullmatch(r"\d+(?:-\d+)?", value.strip()):
+        raise argparse.ArgumentTypeError("use a number or low-high range, such as 220-300")
+    low, *rest = map(int, value.split("-"))
+    if low < 1 or (rest and rest[0] < low):
+        raise argparse.ArgumentTypeError("range must be positive and ordered low-to-high")
+    return value
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Create and package an AI-assisted book.")
+    parser.add_argument("--mode", choices=("review", "auto"), default=os.getenv("AI_BOOK_MODE", "review"))
+    parser.add_argument("--provider", choices=tuple(PROVIDER_CONFIG_MAP))
+    parser.add_argument("--author")
+    parser.add_argument("--pages", type=_range_arg, metavar="MIN-MAX")
+    parser.add_argument("--chapters", type=_range_arg, metavar="MIN-MAX")
+    parser.add_argument("--series", type=int, metavar="BOOKS")
+    parser.add_argument("--cover-source", choices=("manual", "perchance", "pollinations"))
+    parser.add_argument("--cover-background", metavar="IMAGE")
+    parser.add_argument(
+        "--publish-kdp",
+        action="store_true",
+        help="submit the completed eBook to KDP using the saved Chrome profile",
+    )
+    parser.add_argument(
+        "--kdp-visible",
+        action="store_true",
+        help="show Chrome during KDP publishing (headless is the default)",
+    )
+    parser.add_argument("--fresh", action="store_true", help="archive old ebook assets and start a new project")
+    parser.add_argument(
+        "--continuous",
+        action="store_true",
+        help="keep creating and packaging new books until interrupted or the provider stops",
+    )
+    return parser.parse_args()
+
+
+def _existing_author() -> str:
+    try:
+        data = json.loads(PROJECT_STATE_FILE.read_text(encoding="utf-8"))
+        return str(data.get("init", {}).get("author_name", "")).strip()
+    except Exception:
+        return ""
 
 
 def main() -> None:
@@ -460,9 +596,38 @@ def main() -> None:
     print("=" * 60)
 
     try:
+        args = _parse_args()
+        if args.continuous and args.mode != "auto":
+            raise ValueError("--continuous requires --mode auto")
+        if args.kdp_visible and not args.publish_kdp:
+            raise ValueError("--kdp-visible requires --publish-kdp")
+        os.environ["AI_BOOK_MODE"] = args.mode
+        author = args.author or os.getenv("AI_BOOK_AUTHOR") or _existing_author()
+        if not author and args.mode == "review":
+            author = input("Author name [AI Book Creator]: ").strip()
+        os.environ["AI_BOOK_AUTHOR"] = author or "AI Book Creator"
+        if args.pages:
+            os.environ["AI_BOOK_PAGE_RANGE"] = args.pages
+        if args.chapters:
+            os.environ["AI_BOOK_CHAPTER_RANGE"] = args.chapters
+        if args.series is not None:
+            if args.series < 1:
+                raise ValueError("--series must be at least 1")
+            os.environ["AI_BOOK_SERIES_COUNT"] = str(args.series)
+        if args.cover_background:
+            os.environ["AI_BOOK_COVER_BACKGROUND"] = args.cover_background
+        os.environ["AI_BOOK_COVER_SOURCE"] = args.cover_source or "pollinations"
+
         default_provider = _load_last_provider()
-        provider = _prompt_provider(default_provider)
-        run(provider)
+        provider = args.provider or (default_provider if args.mode == "auto" else _prompt_provider(default_provider))
+        run(
+            provider,
+            args.mode,
+            args.fresh,
+            args.continuous,
+            args.publish_kdp,
+            args.kdp_visible,
+        )
     except KeyboardInterrupt:
         print("\n\nProcess interrupted by user. Progress has been saved.")
     except Exception as e:

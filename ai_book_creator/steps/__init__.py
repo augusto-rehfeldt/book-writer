@@ -8,6 +8,7 @@ from .step_1_structure import StructureStep
 from .step_2_write import WriteStep
 from .step_3_review import ReviewStep
 from .step_4_ebook import EbookStep
+from .step_5_publish import PublishStep
 
 __all__ = [
     "BaseStep",
@@ -16,4 +17,5 @@ __all__ = [
     "WriteStep",
     "ReviewStep",
     "EbookStep",
+    "PublishStep",
 ]

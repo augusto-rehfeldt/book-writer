@@ -14,6 +14,7 @@ STEP_SEQUENCE = [
     ("written", "Step 2: Writing Chapters"),
     ("reviewed", "Step 3: Review"),
     ("ebook", "Step 4: Ebook Export"),
+    ("publishing", "Step 5: KDP Publishing Handoff"),
 ]
 
 
@@ -136,6 +137,7 @@ class ProjectManager:
             "written",
             "reviewed",
             "ebook",
+            "publishing",
             "fixed",
         ]
         for step in step_names:
@@ -296,6 +298,22 @@ class ProjectManager:
                 and int(step_data.get("source_chapter_count", 0)) == source_chapter_count
                 and int(step_data.get("source_written_word_count", 0)) == source_written_words
                 and int(step_data.get("source_reviewed_word_count", 0)) == source_reviewed_words
+            )
+
+        if step_name == "publishing":
+            package_file = step_data.get("package_file", "")
+            checklist_file = step_data.get("checklist_file", "")
+            source_ebook = step_data.get("source_ebook_file", "")
+            ebook_file = self.get_step_data("ebook").get("output_file", "")
+            return (
+                bool(package_file)
+                and os.path.isfile(package_file)
+                and bool(checklist_file)
+                and os.path.isfile(checklist_file)
+                and bool(source_ebook)
+                and bool(ebook_file)
+                and os.path.abspath(source_ebook) == os.path.abspath(ebook_file)
+                and self._is_step_valid("ebook")
             )
 
         return True

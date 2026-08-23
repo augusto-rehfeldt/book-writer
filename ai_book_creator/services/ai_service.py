@@ -11,6 +11,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, List, Tuple
+from urllib.parse import urlparse
 
 import requests
 
@@ -72,36 +73,79 @@ def ensure_openai_oauth_proxy() -> None:
 # Both are single-file JSON written by the opencode CLI on `opencode auth login`.
 OPENCODE_USER_CONFIG = Path.home() / ".config" / "opencode" / "opencode.jsonc"
 OPENCODE_USER_AUTH = Path.home() / ".local" / "share" / "opencode" / "auth.json"
+# Same opencode account key serves both the paid "opencode-go" tier and the
+# pay-per-use "opencode-zen" tier (which carries the free models).
+OPENCODE_PROVIDER_KEYS = ("opencode-zen", "opencode", "opencode-go")
 
 
 def load_opencode_go_sync() -> Dict[str, Any]:
-    """Read opencode-go API key + per-model context/output limits from opencode's
+    """Read opencode API key + per-model context/output limits from opencode's
     own userspace files. Returns {"api_key": str, "models": {mid_lower: {...}}};
-    missing fields are silently skipped, so callers can use it as best-effort."""
+    missing fields are silently skipped, so callers can use it as best-effort.
+    Covers both the opencode-go (subscription) and opencode-zen (PAYG + free)
+    tiers; first auth entry wins."""
     out: Dict[str, Any] = {"api_key": "", "models": {}}
     try:
         if OPENCODE_USER_AUTH.exists():
             auth = json.loads(OPENCODE_USER_AUTH.read_text(encoding="utf-8"))
-            entry = auth.get("opencode-go", {}) if isinstance(auth, dict) else {}
-            if isinstance(entry, dict) and entry.get("type") == "api":
-                out["api_key"] = str(entry.get("key", "") or "")
+            for name in OPENCODE_PROVIDER_KEYS:
+                entry = auth.get(name, {}) if isinstance(auth, dict) else {}
+                if isinstance(entry, dict) and entry.get("type") == "api":
+                    out["api_key"] = str(entry.get("key", "") or "")
+                    if out["api_key"]:
+                        break
     except Exception:
         pass
     try:
         if OPENCODE_USER_CONFIG.exists():
             cfg = json.loads(OPENCODE_USER_CONFIG.read_text(encoding="utf-8"))
             providers = cfg.get("provider", {}) if isinstance(cfg, dict) else {}
-            ocgo = providers.get("opencode-go", {}) if isinstance(providers, dict) else {}
-            for mid, info in (ocgo.get("models", {}) or {}).items():
-                if isinstance(info, dict):
-                    limit = info.get("limit", {}) or {}
-                    out["models"][str(mid).strip().lower()] = {
-                        "name": str(mid),
-                        "max_output": int(limit.get("output", 4096) or 4096),
-                        "context": int(limit.get("context", 0) or 0),
-                    }
+            for name in OPENCODE_PROVIDER_KEYS:
+                ocgo = providers.get(name, {}) if isinstance(providers, dict) else {}
+                if not isinstance(ocgo, dict):
+                    continue
+                for mid, info in (ocgo.get("models", {}) or {}).items():
+                    if isinstance(info, dict):
+                        limit = info.get("limit", {}) or {}
+                        out["models"][str(mid).strip().lower()] = {
+                            "name": str(mid),
+                            "max_output": int(limit.get("output", 4096) or 4096),
+                            "context": int(limit.get("context", 0) or 0),
+                        }
     except Exception:
         pass
+    return out
+
+
+# Claude Code takes short aliases as well as full ids, so a config may name
+# either. Anything not listed is passed through untouched.
+CLAUDE_ALIAS = {"pro": "opus", "flash": "sonnet", "fast": "haiku"}
+
+
+def claude_executable() -> str:
+    exe = shutil.which("claude") or shutil.which("claude.cmd")
+    if not exe:
+        raise RuntimeError(
+            "The Claude Code CLI is not on PATH. Install Claude Code or pick another provider."
+        )
+    return exe
+
+
+def claude_chat(model: str, prompt: str, timeout: int = 1800) -> str:
+    """One completion from the Claude Code CLI in print mode.
+
+    The prompt goes in on stdin, never as an argument: Windows caps a command
+    line at 32k characters and a chapter-sized prompt blows straight past it.
+    """
+    args = [claude_executable(), "-p", "--output-format", "text",
+            "--model", CLAUDE_ALIAS.get(model.lower(), model)]
+    proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise RuntimeError(
+            f"claude {model} returned no text: {(proc.stderr or '').strip()[:300]}"
+        )
     return out
 
 
@@ -184,6 +228,14 @@ class AIService:
             if str(model).strip()
         }
         self.base_url = self._resolve_base_url()
+        # ponytail: the "openrouter" client branch also serves opencode-go/zen, so
+        # its logs name the real host instead of the branch ("why is it on
+        # openrouter?"). Other providers already match their endpoint.
+        self.provider_label = self.provider
+        if self.provider == "openrouter" and self.base_url:
+            host = urlparse(self.base_url).hostname
+            if host and host != "openrouter.ai":
+                self.provider_label = host
         self.use_openai_client = bool(self.config.get("use_openai_client", True))
         self.timeout = int(self.config.get("timeout", 900))
         self.openai_daily_token_limits = self.config.get(
@@ -232,11 +284,16 @@ class AIService:
     def _resolve_api_key(self) -> str:
         if self.provider == "openai-oauth":
             return "openai-oauth"
+        if self.provider == "claude":
+            # Claude Code runs on the user's own subscription through the CLI;
+            # there is no key to resolve and no key to leak.
+            return "claude-code-cli"
         env_key_map = {
             "openai": "OPENAI_API_KEY",
             "groq": "GROQ_API_KEY",
             "google": "GOOGLE_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
+            "hyper": "HYPER_API_KEY",
         }
         provider_env = str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
         candidates = [
@@ -247,11 +304,12 @@ class AIService:
             os.getenv("GOOGLE_API_KEY", ""),
             os.getenv("MINIMAX_API_KEY", ""),
             os.getenv("OPENROUTER_API_KEY", ""),
+            os.getenv("HYPER_API_KEY", ""),
             self.config.get("api_key", ""),
         ]
-        # ponytail: when targeting opencode-go, prefer opencode's live auth.json
+        # ponytail: when targeting an opencode tier, prefer opencode's live auth.json
         # so a re-login in the opencode CLI automatically refreshes our key.
-        if provider_env == "OPENCODE_GO_API_KEY":
+        if provider_env in ("OPENCODE_GO_API_KEY", "OPENCODE_ZEN_API_KEY"):
             candidates.insert(0, load_opencode_go_sync().get("api_key", ""))
         for candidate in candidates:
             if candidate:
@@ -265,6 +323,7 @@ class AIService:
             "google": "GOOGLE_API_KEY",
             "minimax": "MINIMAX_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
+            "hyper": "HYPER_API_KEY",
         }
         return str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
 
@@ -274,7 +333,7 @@ class AIService:
         Returns False if the user declined to enter a key (caller should raise).
         """
         api_key_env = self._api_key_env_name()
-        print(f"\n[!] {self.provider} API request returned 401 Unauthorized.")
+        print(f"\n[!] {self.provider_label} API request returned 401 Unauthorized.")
         print(f"    Your {api_key_env} is missing or invalid.")
         new_key = input(f"    Enter your {api_key_env} (will be saved to .env): ").strip()
         if new_key:
@@ -312,16 +371,19 @@ class AIService:
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
     def _resolve_base_url(self) -> str:
+        if self.provider == "claude":
+            return ""          # the CLI needs no endpoint
         default_base_urls = {
             "openai": "https://api.openai.com/v1",
             "openai-oauth": "http://127.0.0.1:10531/v1",
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
+            "hyper": "https://hyper.charm.land/v1",
         }
         raw_base_url = os.getenv("AI_BASE_URL", self.config.get("base_url", default_base_urls.get(self.provider, "https://api.openai.com/v1")))
         base_url = raw_base_url.rstrip("/")
 
-        if self.provider in ("openai", "openai-oauth", "groq", "http", "openrouter") and not base_url.endswith("/v1"):
+        if self.provider in ("openai", "openai-oauth", "groq", "http", "openrouter", "hyper") and not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
 
         return base_url
@@ -826,7 +888,11 @@ class AIService:
         self.client = None
         self.session = None
 
-        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider == "claude":
+            print(f"Using the Claude Code CLI ({claude_executable()}) on your subscription")
+            return
+
+        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper") and self.use_openai_client and _HAS_OPENAI_CLIENT:
             try:
                 kwargs = {"api_key": self.api_key, "base_url": self.base_url}
                 if self.provider == "openrouter":
@@ -837,7 +903,7 @@ class AIService:
                 if self.provider == "groq":
                     print("Using OpenAI-compatible client for Groq")
                 else:
-                    print(f"Using OpenAI Python client for {self.provider} at {self.base_url}")
+                    print(f"Using OpenAI Python client for {self.provider_label} at {self.base_url}")
                 return
             except Exception as e:
                 print(f"{self.provider.title()} client initialization failed, falling back to HTTP. Error:", e)
@@ -1019,13 +1085,16 @@ class AIService:
         model_type: str = "writing",
         max_retries: int = 5,
         max_completion_tokens: Optional[int] = None,
+        model: Optional[str] = None,
     ) -> str:
         retry_delays = [3, 8, 20, 45, 90]
         attempt = 0
         last_error = None
         request_prompt = prompt
 
-        model_to_use = self.writing_model if model_type == "writing" else self.review_model
+        # `model` overrides the role default: the humanness judges have to run on
+        # a model that did not write the text, or the verdict measures nothing.
+        model_to_use = model or (self.writing_model if model_type == "writing" else self.review_model)
         completion_tokens = max_completion_tokens or self._default_completion_tokens(model_type)
         payload = {"model": model_to_use, "input": request_prompt}
 
@@ -1048,7 +1117,13 @@ class AIService:
                             usage_state_path=self.usage_state_path,
                         )
 
-                if self.provider == "google" and self.client is not None:
+                if self.provider == "claude":
+                    text = claude_chat(model_to_use, request_prompt, timeout=self.timeout)
+                    if text.strip():
+                        return text
+                    print(f"[claude] returned empty content on attempt {attempt + 1}")
+
+                elif self.provider == "google" and self.client is not None:
                     # Gemini API
                     try:
                         resp = self.client.models.generate_content(
@@ -1085,12 +1160,12 @@ class AIService:
                             if retry_ok:
                                 continue
                         last_error = e
-                        print(f"[{self.provider}_client] client call failed on attempt {attempt + 1}: {e}")
+                        print(f"[{self.provider_label}_client] client call failed on attempt {attempt + 1}: {e}")
                         raise
                     text = self._extract_text_from_response(resp)
                     if text and text.strip():
                         return text
-                    print(f"[{self.provider}_client] returned empty content on attempt {attempt + 1}")
+                    print(f"[{self.provider_label}_client] returned empty content on attempt {attempt + 1}")
 
                 elif self.client is not None and self.provider == "openai":
                     # OpenAI Python client
@@ -1105,7 +1180,7 @@ class AIService:
                         resp = self.client.responses.create(**client_kwargs)
                     except Exception as e:
                         last_error = e
-                        print(f"[{self.provider}_client] client call failed on attempt {attempt + 1}: {e}")
+                        print(f"[{self.provider_label}_client] client call failed on attempt {attempt + 1}: {e}")
                         raise
                     text = self._extract_text_from_response(resp)
                     if text and text.strip():
@@ -1119,7 +1194,7 @@ class AIService:
                                     "Progress has been cached and the next OpenAI request will pause."
                                 )
                         return text
-                    print(f"[{self.provider}_client] returned empty content on attempt {attempt + 1}")
+                    print(f"[{self.provider_label}_client] returned empty content on attempt {attempt + 1}")
 
                 elif self.client is not None and self.provider == "groq":
                     try:
@@ -1147,17 +1222,21 @@ class AIService:
                         return text
                     print(f"[groq_client] returned empty content on attempt {attempt + 1}")
 
-                elif self.client is not None and self.provider in ("openai-oauth", "openrouter"):
+                elif self.client is not None and self.provider in ("openai-oauth", "openrouter", "hyper"):
                     try:
+                        # hyper.charm.land is OpenAI-compatible on the older
+                        # `max_tokens` spelling only; the newer name is a 400.
+                        token_arg = ("max_tokens" if self.provider == "hyper"
+                                     else "max_completion_tokens")
                         resp = self.client.chat.completions.create(
                             model=model_to_use,
                             messages=[{"role": "user", "content": request_prompt}],
-                            max_completion_tokens=completion_tokens,
                             timeout=self.timeout,
+                            **{token_arg: completion_tokens},
                         )
                     except Exception as e:
                         last_error = e
-                        print(f"[{self.provider}_client] client call failed on attempt {attempt + 1}: {e}")
+                        print(f"[{self.provider_label}_client] client call failed on attempt {attempt + 1}: {e}")
                         raise
                     text = self._extract_text_from_response(resp)
                     if text and text.strip():
@@ -1167,7 +1246,7 @@ class AIService:
                         finish_reason = resp.choices[0].finish_reason
                     except Exception:
                         pass
-                    print(f"[{self.provider}_client] returned empty content on attempt {attempt + 1} (finish_reason={finish_reason})")
+                    print(f"[{self.provider_label}_client] returned empty content on attempt {attempt + 1} (finish_reason={finish_reason})")
 
                 else:
                     # HTTP endpoint (OpenAI-compatible)
@@ -1185,7 +1264,7 @@ class AIService:
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"
-                    elif self.provider in ("openai-oauth", "openrouter"):
+                    elif self.provider in ("openai-oauth", "openrouter", "hyper"):
                         payload = {
                             "model": model_to_use,
                             "messages": [{"role": "user", "content": request_prompt}],
@@ -1293,7 +1372,7 @@ class AIService:
                             continue
                 if request_too_large and attempt < max_retries - 1:
                     print(
-                        f"[{self.provider}] Request too large on attempt {attempt + 1}; "
+                        f"[{self.provider_label}] Request too large on attempt {attempt + 1}; "
                         "shrinking prompt and retrying."
                     )
                     request_prompt = self._shrink_prompt_text(request_prompt, shrink_factor=0.7)
@@ -1304,7 +1383,7 @@ class AIService:
                     time.sleep(delay)
                     continue
                 last_error = e
-                print(f"[{self.provider}] Error on attempt {attempt + 1}: {e}")
+                print(f"[{self.provider_label}] Error on attempt {attempt + 1}: {e}")
 
             delay = retry_delays[min(attempt, len(retry_delays)-1)]
             print(f"Waiting {delay} seconds before retry...")
@@ -1319,11 +1398,11 @@ class AIService:
 
 
 if __name__ == "__main__":
-    # ponytail: self-check — print the live opencode-go sync; asserts that the
-    # shape matches what _resolve_api_key and cli._load_opencode_go_models expect.
+# ponytail: self-check — print the live opencode sync; asserts that the
+    # shape matches what _resolve_api_key and cli._load_catalogue expect.
     sync = load_opencode_go_sync()
     print(
-        "opencode-go sync:",
+        "opencode sync:",
         f"key={'present' if sync['api_key'] else 'missing'}, models={len(sync['models'])}",
     )
     assert "api_key" in sync and isinstance(sync["api_key"], str), "api_key missing/wrong type"

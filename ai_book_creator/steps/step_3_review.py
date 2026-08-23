@@ -6,7 +6,9 @@ import os
 from datetime import datetime
 from typing import Dict, Any, List, Optional
 from .base_step import BaseStep
+from .step_2_write import AUTHORIAL_PROSE_GUIDANCE
 from ..core.project_manager import BrokenProjectStateError
+from ..utils import humanizer
 from ai_book_creator.utils.text_utils import calculate_page_count, calculate_word_count
 from ai_book_creator.models.chapter_model import Chapter
 
@@ -86,20 +88,26 @@ class ReviewStep(BaseStep):
             self._expansion_log = []
         
         all_text = self._combine_chapters_text(chapters_content)
-        
+
+        # Book-level humanness: every chapter can sit inside the human range and
+        # the book still read as machine-written, because published novels differ
+        # from themselves more than this pipeline differs from itself.
+        spread = self._humanness_spread(chapters_content)
+
         print("Analyzing book...")
-        
+
         # Generate analysis
         analysis = self._generate_analysis(init_data, all_text)
-        
+
         # Save
-        self._save_analysis(analysis, init_data, written_data, target_pages)
-        
+        self._save_analysis(analysis, init_data, written_data, target_pages, spread)
+
         review_data = {
             "analysis": analysis,
             "chapter_count": len(written_data.get("chapters", {})),
             "total_word_count": written_data.get("total_word_count", 0),
             "total_pages": written_data.get("total_pages", 0),
+            "humanness": spread,
             "timestamp": datetime.now().isoformat()
         }
         
@@ -107,6 +115,23 @@ class ReviewStep(BaseStep):
         self.mark_completed()
         return review_data
     
+    def _humanness_spread(self, chapters_content: Dict[str, Chapter]) -> Dict[str, Any]:
+        """Report, never rewrite: the fix for a uniform book is the next book."""
+        if not humanizer.enabled() or len(chapters_content) < 4:
+            return {}
+        ordered = sorted(chapters_content.values(), key=lambda c: c.chapter_number)
+        report = humanizer.book_report([c.content for c in ordered])
+        scores = [humanizer.local_score(c.content)["score"] for c in ordered]
+        report["chapter_scores"] = scores
+        report["worst_chapter"] = ordered[scores.index(max(scores))].chapter_number if scores else 0
+        if scores:
+            print(f"Humanness: median {sorted(scores)[len(scores) // 2]:.1f}, "
+                  f"worst {max(scores):.1f} (chapter {report['worst_chapter']}); "
+                  f"published chapters run 0-19 at the 90th percentile.")
+        for line in report.get("uniform", []):
+            print(f"  ⚠ {line}")
+        return report
+
     def _read_chapters_content(self, chapters_dict: Dict) -> Dict[str, Chapter]:
         chapters_content = {}
         for chapter_key, chapter_info in chapters_dict.items():
@@ -168,20 +193,25 @@ class ReviewStep(BaseStep):
                 if chapter.word_count >= expansion_ceiling:
                     continue
 
-                min_request = max(int(chapter.word_count * 0.2), 400)
+                # A flat 400-word floor would inflate a deliberately short chapter
+                # by half; scale the smallest useful request to its own budget.
+                min_request = max(int(chapter.word_count * 0.2), min(400, baseline_estimate // 4))
                 target_growth = max(int(baseline_estimate * 0.25), min_request)
                 request_capacity = expansion_ceiling - chapter.word_count
                 default_request = min(max(min_request, target_growth), request_capacity)
 
                 chapters_to_expand.append(
-                    (chapter_key, chapter, chapter_plot, request_capacity, min_request, default_request)
+                    (chapter_key, chapter, chapter_plot, request_capacity, min_request, default_request,
+                     chapter.word_count / max(baseline_estimate, 1))
                 )
 
             if not chapters_to_expand:
                 self._expansion_log.append("Expansion halted: no chapters remain under their safety ceiling.")
                 break
 
-            chapters_to_expand.sort(key=lambda item: item[1].word_count)
+            # Expand whichever chapter is furthest under *its own* budget, not the
+            # shortest one: the short chapters are short on purpose.
+            chapters_to_expand.sort(key=lambda item: item[-1])
             expanded_this_cycle = False
 
             for (
@@ -191,6 +221,7 @@ class ReviewStep(BaseStep):
                 request_capacity,
                 min_request,
                 default_request,
+                _fill_ratio,
             ) in chapters_to_expand:
                 if current_pages >= target_pages or iteration >= max_iterations:
                     break
@@ -287,7 +318,7 @@ class ReviewStep(BaseStep):
         chapter_content = self._truncate_text(chapter.content, 7000)
         prompt = self.ai_service.build_sectioned_prompt(
             instruction=(
-                "You are an expert historical fiction author. Expand the chapter while preserving the core plot points. "
+                "Expand this chapter in the voice already on the page without changing its core plot points. "
                 f"Target roughly {requested_additional_words} new words ({estimated_pages:.1f} pages) during iteration {iteration}. "
                 "Return ONLY the expanded chapter content."
             ),
@@ -305,9 +336,10 @@ class ReviewStep(BaseStep):
                 ("Current chapter content", chapter_content),
                 (
                     "Expansion requirements",
-                    "Maintain all established plot beats, character motivations, and timeline continuity. "
-                    "Add richer descriptions, deeper internal monologue, minor interactions or subplots, and more detailed scenes and dialogue. "
-                    "Do not summarize; produce fully written prose that can replace the original text verbatim.",
+                    "Maintain every established plot beat, character motivation, and point in the timeline. "
+                    "Add complete moments that reveal character or alter tension; do not pad existing sentences with extra adjectives or explanation. "
+                    "Match the chapter's existing voice and produce fully written prose that can replace it verbatim.\n\n"
+                    + AUTHORIAL_PROSE_GUIDANCE,
                 ),
             ],
             max_prompt_tokens=9000,
@@ -319,7 +351,7 @@ class ReviewStep(BaseStep):
                 "Chapter number": 20,
                 "Chapter plot outline": 1200,
                 "Current chapter content": 3500,
-                "Expansion requirements": 250,
+                "Expansion requirements": 500,
             },
         )
         
@@ -374,7 +406,8 @@ class ReviewStep(BaseStep):
             return text
         return text[: max_chars - 3].rstrip() + "..."
     
-    def _save_analysis(self, analysis: str, init_data: Dict, written_data: Dict, target_pages: int):
+    def _save_analysis(self, analysis: str, init_data: Dict, written_data: Dict,
+                       target_pages: int, spread: Optional[Dict[str, Any]] = None):
         filename = os.path.join(self.output_dir, "book_analysis.txt")
         
         with open(filename, 'w', encoding='utf-8') as f:
@@ -396,7 +429,23 @@ class ReviewStep(BaseStep):
             else:
                 f.write("✅ Book meets or exceeds target length\n")
             f.write("\n")
-            
+
+            if spread and spread.get("chapter_scores"):
+                scores = spread["chapter_scores"]
+                f.write("="*60 + "\n")
+                f.write("🧪 HUMANNESS\n")
+                f.write("="*60 + "\n")
+                f.write("Scored against 577 chapters of published fiction "
+                        "(0 = reads published, 100 = reads generated).\n")
+                f.write(f"Published chapters: median 1.5, 90th percentile 19.\n")
+                f.write(f"This book: median {sorted(scores)[len(scores) // 2]:.1f}, "
+                        f"worst {max(scores):.1f} (chapter {spread.get('worst_chapter')})\n")
+                for line in spread.get("uniform", []):
+                    f.write(f"⚠️ {line}\n")
+                if not spread.get("uniform"):
+                    f.write("✅ Chapters vary from each other as much as a real novel's do\n")
+                f.write("\n")
+
             f.write(analysis)
         
         print(f"Analysis saved to: {filename}")

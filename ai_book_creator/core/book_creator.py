@@ -7,16 +7,18 @@ import json
 import sys
 import shutil
 import glob
+import random
 import re
 
 from .project_manager import ProjectManager
 from .project_manager import BrokenProjectStateError
 from ..services.ai_service import AIService, DailyTokenBudgetExceeded, UsageLimitExceeded
-from ..steps.step_0_init import InitStep
+from ..steps.step_0_init import CREATIVE_LENSES, InitStep
 from ..steps.step_1_structure import StructureStep
 from ..steps.step_2_write import WriteStep
 from ..steps.step_3_review import ReviewStep
 from ..steps.step_4_ebook import EbookStep
+from ..steps.step_5_publish import PublishStep
 from ..utils.glossary_manager import GlossaryManager
 from ..utils.text_utils import calculate_page_count
 
@@ -53,6 +55,7 @@ class AIBookCreator:
             WriteStep(self.ai_service, self.project_manager, self.glossary_manager, self.output_dir),
             ReviewStep(self.ai_service, self.project_manager, self.output_dir),
             EbookStep(self.ai_service, self.project_manager, self.output_dir),
+            PublishStep(self.ai_service, self.project_manager, self.output_dir),
         ]
         
         print("✅ AI Book Creator initialized successfully!")
@@ -61,7 +64,7 @@ class AIBookCreator:
         with open(self.config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
     
-    def create_book(self):
+    def create_book(self) -> bool:
         """Main method to create the complete book with full resumability"""
         print("🚀 Starting AI Book Creation Process")
         print("=" * 60)
@@ -96,14 +99,14 @@ class AIBookCreator:
                 if recovery_plan["state_status"] == "broken":
                     if not self._prompt_repair_and_restart(recovery_plan):
                         print("Leaving the saved state unchanged. You can run `python utils.py repair book_output` later.")
-                        return
+                        return False
             
             if self.ai_service.has_budget_pause():
                 self._mark_budget_pause()
                 self.project_manager.save_project()
                 print(self._budget_pause_message())
                 print("The current progress has been cached. Rerun later to continue, or stop here if you are done for today.")
-                return
+                return False
             
             try:
                 # Execute each step in sequence
@@ -117,7 +120,7 @@ class AIBookCreator:
                             self.project_manager.save_project()
                             print(self._budget_pause_message())
                             print("The current progress has been cached. Rerun later to continue, or stop here if you are done for today.")
-                            return
+                            return False
                     else:
                         print(f"\n⏩ Step {step_num}: {step_processor.__class__.__name__} - Already completed")
                 
@@ -126,7 +129,7 @@ class AIBookCreator:
                     self.project_manager.save_project()
                     print(self._budget_pause_message())
                     print("The current progress has been cached. Rerun later to continue, or stop here if you are done for today.")
-                    return
+                    return False
 
                 # Generate final glossary
                 self.glossary_manager.generate_final_glossary(self.project_manager.book_data)
@@ -143,7 +146,18 @@ class AIBookCreator:
                 if not series_mode or current_book >= series_book_count:
                     if series_mode and current_book >= series_book_count:
                         print(f"\n🏆 Entire {series_book_count}-book series creation complete!")
-                    break
+                    return True
+
+                if os.getenv("AI_BOOK_MODE", "review").strip().lower() != "auto":
+                    try:
+                        proceed = input(
+                            f"\nBook {current_book} is packaged. Continue to Book {current_book + 1}? [Y/n]: "
+                        ).strip().lower()
+                    except EOFError:
+                        proceed = "n"
+                    if proceed not in ("", "y", "yes"):
+                        print("Series paused between books. Rerun when you are ready to continue.")
+                        break
 
                 self._advance_to_next_book(current_book)
                 
@@ -186,6 +200,8 @@ class AIBookCreator:
                 print("📁 Progress saved despite error. You can try to resume later.")
                 break
 
+        return False
+
     def _extract_titles_from_layout(self, layout: str) -> list[str]:
         """Extract up to three potential book titles from the layout text."""
         titles = []
@@ -207,7 +223,8 @@ class AIBookCreator:
         # Clean and deduplicate
         cleaned = []
         for t in titles:
-            t = t.strip()
+            t = re.sub(r"[*_`#]", "", t).strip().strip('"')
+            t = re.sub(r"(?i)^title\s*:\s*", "", t).strip()
             if t and t not in cleaned:
                 cleaned.append(t)
         return cleaned
@@ -316,23 +333,64 @@ class AIBookCreator:
                             candidate_titles[i] = f"{title} (Book {current_book + 1})"
                     chosen_title = candidate_titles[0]
         
-        # Add the chosen title to the used list
-        if chosen_title:
-            used_titles.append(chosen_title)
-            init_data["book_titles"] = used_titles
-        
         print(f"\n📋 BOOK {current_book + 1} LAYOUT:")
         print("-" * 50)
         print(new_layout)
         print("-" * 50)
+
+        if os.getenv("AI_BOOK_MODE", "review").strip().lower() != "auto":
+            try:
+                feedback = input(
+                    "\nPress Enter to accept this book layout, or type feedback to revise it: "
+                ).strip()
+            except EOFError:
+                feedback = ""
+            if feedback:
+                revision_prompt = self.ai_service.build_sectioned_prompt(
+                    instruction=(
+                        "Revise this book layout from the reader's feedback. Preserve series continuity "
+                        "and return the complete replacement layout in the same format."
+                    ),
+                    sections=[("Current layout", new_layout), ("Reader feedback", feedback)],
+                    max_prompt_tokens=5000,
+                )
+                new_layout = self.ai_service.generate_content(
+                    revision_prompt, max_completion_tokens=1800
+                )
+                print("\n📋 REVISED BOOK LAYOUT:")
+                print("-" * 50)
+                print(new_layout)
+                print("-" * 50)
+
+        candidate_titles = self._extract_titles_from_layout(new_layout)
+        chosen_title = next((title for title in candidate_titles if title not in used_titles), None)
+        if not chosen_title and candidate_titles:
+            chosen_title = f"{candidate_titles[0]} (Book {current_book + 1})"
+        if chosen_title:
+            used_titles.append(chosen_title)
+            init_data["book_titles"] = used_titles
         
         # 3. Update Init Data
         init_data["current_book"] = current_book + 1
         init_data["layout_content"] = new_layout
+        init_data["book_title"] = chosen_title or f"Book {current_book + 1}"
+        init_data["creative_lens"] = random.choice(CREATIVE_LENSES)
+        chapter_range = os.getenv("AI_BOOK_CHAPTER_RANGE", "").strip()
+        old_count = max(5, int(init_data.get("chapter_count", 10)))
+        if chapter_range:
+            low, high = InitStep._parse_range(chapter_range, 5)
+        else:
+            low, high = max(5, round(old_count * 0.85)), max(5, round(old_count * 1.15))
+        init_data["chapter_count"] = random.randint(low, high)
+        init_data["words_per_chapter"] = max(
+            800,
+            int(init_data.get("target_word_count", page_count * 250))
+            // init_data["chapter_count"],
+        )
         self.project_manager.set_step_data("init", init_data)
         
         # 4. Clear Downstream Steps
-        for step_name in ["structure", "written", "reviewed", "ebook"]:
+        for step_name in ["structure", "written", "reviewed", "ebook", "publishing"]:
             if step_name in self.project_manager.book_data:
                 del self.project_manager.book_data[step_name]
                 
@@ -429,6 +487,7 @@ class AIBookCreator:
             "written": "Step 2: Writing Chapters",
             "reviewed": "Step 3: Review",
             "ebook": "Step 4: Ebook Export",
+            "publishing": "Step 5: KDP Publishing Handoff",
         }
         return labels.get(step_name, step_name)
 

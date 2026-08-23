@@ -5,6 +5,8 @@ Step 0: Initialize Book - Concept, scope, layout, and character setup
 from datetime import datetime
 from typing import Dict, Any, Optional
 import math
+import os
+import random
 import re
 
 from .base_step import BaseStep
@@ -13,6 +15,16 @@ from ..utils.text_utils import pages_to_words, WORDS_PER_PAGE
 # ponytail: drives the chapter-count estimate; override at init if a book needs
 # longer/shorter chapters. Raise to ~4000 for fewer, longer chapters.
 DEFAULT_WORDS_PER_CHAPTER = 3000
+CREATIVE_LENSES = (
+    "Build the premise around a difficult choice with no clean moral answer.",
+    "Combine two genres that rarely share the same story engine.",
+    "Let an ordinary object or ritual become essential to the central conflict.",
+    "Use a setting whose rules actively complicate every major decision.",
+    "Give the apparent antagonist a goal the protagonist could almost support.",
+    "Make the protagonist unusually competent at the wrong thing.",
+    "Let a minor promise in the opening become costly by the climax.",
+    "Use an asymmetric structure: discoveries and reversals need not arrive at regular intervals.",
+)
 
 
 class InitStep(BaseStep):
@@ -45,6 +57,7 @@ class InitStep(BaseStep):
             target_word_count = existing.get("target_word_count")
             chapter_count = existing.get("chapter_count")
             words_per_chapter = existing.get("words_per_chapter")
+            creative_lens = existing.get("creative_lens")
             series_layout_content = existing.get("series_layout_content", "")
             proceed_confirmed = existing.get("_proceed_confirmed", False)
             print("\n📂 Resuming from saved initialization data...")
@@ -57,8 +70,11 @@ class InitStep(BaseStep):
             target_word_count = None
             chapter_count = None
             words_per_chapter = None
+            creative_lens = None
             series_layout_content = ""
             proceed_confirmed = False
+
+        creative_lens = creative_lens or random.choice(CREATIVE_LENSES)
         
         # 1. Scope
         if scope_type is None:
@@ -89,7 +105,7 @@ class InitStep(BaseStep):
         self._print_token_estimate(estimate, target_word_count, page_count, is_series, series_book_count)
         
         # Confirmation
-        if not proceed_confirmed:
+        if not proceed_confirmed and not self._is_auto():
             choice = input("\nProceed with generation? (Y/n): ").strip().lower() or "y"
             if choice not in ('y', 'yes'):
                 print("Generation aborted.")
@@ -107,6 +123,7 @@ class InitStep(BaseStep):
             "page_count": page_count,
             "chapter_count": chapter_count,
             "words_per_chapter": words_per_chapter,
+            "creative_lens": creative_lens,
             "_partial": True,
             "_proceed_confirmed": proceed_confirmed
         }
@@ -128,13 +145,16 @@ class InitStep(BaseStep):
         # Generate layout if missing
         layout_content = existing.get("layout_content")
         if not layout_content:
-            layout_content = self._generate_layout(book_idea, page_count, book_specific_layout)
+            layout_content = self._generate_layout(
+                book_idea, page_count, book_specific_layout, creative_lens
+            )
+
+        book_title = existing.get("book_title") or self._choose_book_title(layout_content)
         
-        # Extract first title for duplicate prevention
-        first_title = self._extract_first_title(layout_content)
+        # Keep the selected title for duplicate prevention across a series.
         book_titles = existing.get("book_titles", [])
-        if first_title and first_title not in book_titles:
-            book_titles.append(first_title)
+        if book_title and book_title not in book_titles:
+            book_titles.append(book_title)
         
         # Final data
         init_data = {
@@ -146,7 +166,10 @@ class InitStep(BaseStep):
             "page_count": page_count,
             "chapter_count": chapter_count,
             "words_per_chapter": words_per_chapter,
+            "creative_lens": creative_lens,
             "layout_content": layout_content,
+            "book_title": book_title,
+            "author_name": os.getenv("AI_BOOK_AUTHOR", "AI Book Creator").strip() or "AI Book Creator",
             "book_titles": book_titles,
             "timestamp": datetime.now().isoformat()
         }
@@ -158,6 +181,9 @@ class InitStep(BaseStep):
         return init_data
     
     def _get_scope(self) -> tuple[str, int]:
+        if self._is_auto():
+            series_count = max(1, int(os.getenv("AI_BOOK_SERIES_COUNT", "1")))
+            return ("series", series_count) if series_count > 1 else ("single", 1)
         while True:
             choice = input(
                 "\n1. Single book\n2. Series of books\n\nChoice (1/2): "
@@ -179,6 +205,27 @@ class InitStep(BaseStep):
             print("Enter a valid number greater than 1.")
     
     def _get_concept(self, is_series: bool) -> str:
+        if self._is_auto():
+            idea_kind = "series ideas" if is_series else "standalone book ideas"
+            inspiration = self.ai_service.generate_content(
+                f"Pitch 7 genuinely distinct {idea_kind}. Cross genres, settings, character types, "
+                "sources of conflict, narrative shapes, and emotional tones. Avoid retellings, stock "
+                "chosen-one plots, generic titles, and premises that differ only cosmetically. For each "
+                "give a title, genre, 2-3 sentence premise, story engine, and central character dilemma.",
+                max_completion_tokens=2200,
+            )
+            prompt = self.ai_service.build_sectioned_prompt(
+                instruction=(
+                    "Act as a demanding commissioning editor. Select the one pitch with the strongest "
+                    "combination of originality, sustained story engine, emotional pressure, and a clear "
+                    "reader promise. Improve its weak spots. Return only one self-contained book concept "
+                    "with a working title, genre, premise, protagonist, central conflict, and ending direction."
+                ),
+                sections=[("Candidate pitches", inspiration)],
+                max_prompt_tokens=3500,
+            )
+            return self.ai_service.generate_content(prompt, max_completion_tokens=1000).strip()
+
         choice = input("\n1. Provide book idea\n2. Get AI inspiration\n\nChoice (1/2): ").strip()
         if choice == "2":
             print("\n🎨 AI Book Ideas:")
@@ -199,6 +246,9 @@ class InitStep(BaseStep):
         return input("\nEnter your book idea: ").strip()
     
     def _get_page_count(self, is_series: bool) -> int:
+        if self._is_auto():
+            low, high = self._parse_range(os.getenv("AI_BOOK_PAGE_RANGE", "180-280"), 20)
+            return random.randint(low, high)
         prompt = "\nDesired page count per book: "
         if is_series:
             prompt = "\nDesired page count per book in the series: "
@@ -225,15 +275,34 @@ class InitStep(BaseStep):
             f"\n📈 Estimated chapters: ~{est} "
             f"(≈{wpc:,} words per chapter, ~{pages_each} pages each)"
         )
+        configured_range = os.getenv("AI_BOOK_CHAPTER_RANGE", "").strip()
+        if self._is_auto() or configured_range:
+            if configured_range:
+                low, high = self._parse_range(configured_range, 5)
+            else:
+                low, high = max(5, round(est * 0.75)), max(5, round(est * 1.25))
+            count = random.randint(low, high)
+            return count, max(800, target_word_count // count)
+
         while True:
             try:
-                raw = input(f"Enter chapter count (Enter to accept ~{est}): ").strip()
+                low, high = max(5, round(est * 0.85)), max(5, round(est * 1.15))
+                raw = input(
+                    f"Enter chapter count or range (Enter for randomized {low}-{high}): "
+                ).strip()
             except (EOFError, StopIteration):
-                return est, wpc
+                count = random.randint(low, high)
+                return count, max(800, target_word_count // count)
             if not raw:
-                return est, wpc
+                low, high = max(5, round(est * 0.85)), max(5, round(est * 1.15))
+                count = random.randint(low, high)
+                return count, max(800, target_word_count // count)
             try:
-                count = int(raw)
+                if "-" in raw:
+                    low, high = self._parse_range(raw, 5)
+                    count = random.randint(low, high)
+                else:
+                    count = int(raw)
             except ValueError:
                 print("Enter a whole number (>=5) or press Enter to accept the estimate.")
                 continue
@@ -297,7 +366,12 @@ class InitStep(BaseStep):
             sections.append(("Series layout context", series_layout_content))
 
         prompt = self.ai_service.build_sectioned_prompt(
-            instruction="Based on the book idea, generate 3 distinct and detailed plot directions/outlines for this specific book. Number them Option 1, Option 2, and Option 3. For each, describe the core conflict, the protagonist's arc, and the main climax.",
+            instruction=(
+                "Generate 4 structurally distinct plot directions for this specific book. Vary the "
+                "protagonist's strategy, source of pressure, revelation pattern, cost of success, climax, "
+                "and ending flavor—not just surface details. Reject the first obvious solution to the premise. "
+                "Number them Option 1 through Option 4."
+            ),
             sections=sections,
             max_prompt_tokens=2500,
             section_token_caps={
@@ -307,6 +381,20 @@ class InitStep(BaseStep):
         )
         options_text = self.ai_service.generate_content(prompt, max_completion_tokens=32000)
 
+        if self._is_auto():
+            selection_prompt = self.ai_service.build_sectioned_prompt(
+                instruction=(
+                    "Choose the plot direction that is least interchangeable with a generic genre novel "
+                    "while still supporting a full book. Strengthen causality and escalation, then return "
+                    "only the selected, revised plot direction."
+                ),
+                sections=[("Book idea", book_idea), ("Plot options", options_text)],
+                max_prompt_tokens=5000,
+            )
+            return self.ai_service.generate_content(
+                selection_prompt, max_completion_tokens=1800
+            ).strip()
+
         while True:
             print("\n" + "="*50)
             print("🎲 PLOT OPTIONS:")
@@ -315,10 +403,10 @@ class InitStep(BaseStep):
             print("="*50)
 
             try:
-                choice = input("\nWhich option do you prefer? (1/2/3) or type custom feedback to regenerate: ").strip()
+                choice = input("\nWhich option do you prefer? (1/2/3/4) or type custom feedback to regenerate: ").strip()
             except (EOFError, StopIteration):
                 choice = "1"
-            if choice in ['1', '2', '3']:
+            if choice in ['1', '2', '3', '4']:
                 return f"Selected Option {choice} from the following proposals:\n\n{options_text}"
             elif choice:
                 print("\n🔄 Regenerating with your feedback...")
@@ -340,20 +428,29 @@ class InitStep(BaseStep):
                 )
                 options_text = self.ai_service.generate_content(rev_prompt, max_completion_tokens=32000)
 
-    def _generate_layout(self, book_idea: str, page_count: int, series_layout_content: str = "") -> str:
+    def _generate_layout(
+        self,
+        book_idea: str,
+        page_count: int,
+        series_layout_content: str = "",
+        creative_lens: str = "",
+    ) -> str:
         # Step 1: Provide multiple options
         plot_direction = self._generate_plot_options(book_idea, series_layout_content)
 
         print("\n🔄 Generating full book layout based on selected plot...")
         sections = [
             ("Book idea", book_idea),
-            ("Chosen Plot Direction", plot_direction)
+            ("Chosen Plot Direction", plot_direction),
+            ("Creative constraint", creative_lens),
         ]
         if series_layout_content:
             sections.append(("Series layout", series_layout_content))
         sections.append((
             "Required output",
-            "3 potential titles; genre; target audience; 3-5 main themes; setting overview; "
+            "Start with 3 ranked potential titles as a plain numbered list. Titles must use different "
+            "syntactic shapes and imagery; avoid generic genre nouns, clichés, subtitles, and near-duplicates. "
+            "Then give genre; target audience; 3-5 main themes; setting overview; "
             "three-act structure; 5-7 main characters with name, role, and brief description.",
         ))
         
@@ -363,6 +460,13 @@ class InitStep(BaseStep):
             max_prompt_tokens=4000,
         )
         layout = self.ai_service.generate_content(prompt, max_completion_tokens=8000)
+
+        if self._is_auto():
+            print("\n📋 AUTOMATIC BOOK LAYOUT:")
+            print("-" * 50)
+            print(layout)
+            print("-" * 50)
+            return layout
 
         # Step 2: Interactive review of Layout
         while True:
@@ -405,6 +509,41 @@ class InitStep(BaseStep):
             if line and not line.startswith(('•', '-', '*')) and len(line) < 80 and line[0].isupper():
                 return line
         return ""
+
+    def _choose_book_title(self, layout_content: str) -> str:
+        titles = []
+        for match in re.findall(r"(?m)^\s*[1-3]\.\s*(.+?)\s*$", layout_content):
+            title = re.sub(r"[*_`#]", "", match).strip().strip('"')
+            title = re.sub(r"(?i)^title\s*:\s*", "", title).strip()
+            if 2 < len(title) <= 120 and title not in titles:
+                titles.append(title)
+        if not titles:
+            return self._extract_first_title(layout_content)
+        if self._is_auto() or len(titles) == 1:
+            return titles[0]
+        print("\nPotential titles:")
+        for index, title in enumerate(titles, 1):
+            print(f"  {index}. {title}")
+        try:
+            choice = input(f"Choose title [1-{len(titles)}, default 1]: ").strip()
+        except (EOFError, StopIteration):
+            choice = ""
+        return titles[int(choice) - 1] if choice.isdigit() and 1 <= int(choice) <= len(titles) else titles[0]
+
+    @staticmethod
+    def _parse_range(value: str, minimum: int) -> tuple[int, int]:
+        match = re.fullmatch(r"\s*(\d+)\s*(?:-\s*(\d+)\s*)?", value)
+        if not match:
+            raise ValueError(f"Expected a number or range like 12-18, got: {value!r}")
+        low = int(match.group(1))
+        high = int(match.group(2) or low)
+        if low < minimum or high < low:
+            raise ValueError(f"Range must be at least {minimum} and ordered low-to-high.")
+        return low, high
+
+    @staticmethod
+    def _is_auto() -> bool:
+        return os.getenv("AI_BOOK_MODE", "review").strip().lower() == "auto"
     
     def _estimate_chapter_count(self, target_word_count: int) -> int:
         # ponytail: no upper cap — long books get more, shorter chapters.

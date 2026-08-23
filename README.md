@@ -55,6 +55,8 @@ book writer/
   - MiniMax (MiniMax-M2.7)
   - OpenRouter
   - OpenCode Go
+  - Claude Code CLI (`claude`) — runs on your Claude subscription, no API key
+  - hyper.charm.land (`hyper`) — OpenAI-compatible, `HYPER_API_KEY`
 
 ## Setup
 
@@ -74,6 +76,20 @@ its `/v1/models` endpoint currently does not report context or output limits.
 
 For OpenCode Go, run `opencode auth login` first, then choose `opencode-go`.
 The app reads the current credentials and model limits from OpenCode's local files.
+
+OpenCode Zen's free models (`deepseek-v4-flash-free`, `mimo-v2.5-free`, etc.) are
+available through the `opencode-zen` provider. No subscription is needed; the same
+OpenCode account key (from `opencode auth login`) is reused automatically.
+
+For `claude`, install the Claude Code CLI and sign in (`claude` on the command
+line). The provider shells out to `claude -p` with the prompt on stdin, so
+generation is billed to your subscription rather than to a metered key. Model
+choice is `opus` / `sonnet` / `haiku`, or any full model id.
+
+For `hyper`, put `HYPER_API_KEY=...` in `.env`. It is an OpenAI-compatible
+endpoint carrying several model families, which is what makes the humanness
+judges useful — a model from another family is the only one whose verdict on
+machine-written prose means anything.
 
 The repository already includes local provider config files in `ai_book_creator/config/`. Edit the `.local.json` file for the provider you want to use.
 
@@ -99,6 +115,31 @@ You can also switch providers by setting `AI_CONFIG_PATH` to one of the other lo
 - `ai_book_creator/config/ai_config_minimax.local.json`
 - `ai_book_creator/config/ai_config_openrouter.json`
 - `ai_book_creator/config/ai_config_opencode_go.json`
+- `ai_book_creator/config/ai_config_opencode_zen.json` (free Zen models)
+- `ai_book_creator/config/ai_config_claude.json` (Claude Code CLI)
+- `ai_book_creator/config/ai_config_hyper.json` (hyper.charm.land)
+
+## Humanness
+
+Chapters are scored against prose ranges measured on 48 published English
+novels (`ai_book_creator/config/prose_baseline.json`) and rewritten block by
+block until they read like one. Rebuild the baseline from your own Calibre
+library, or benchmark real novels against your generated chapters:
+
+```bash
+python benchmarks/build_prose_baseline.py --books 60   # rebuild the baseline
+python benchmarks/measure_chapter_shape.py             # chapter-scale ranges
+python benchmarks/build_prose_baseline.py --bench      # novels vs your drafts
+python -m ai_book_creator.utils.humanizer book_output/chapter_01.txt
+```
+
+Measured on 2026-08-22 over 577 published chapters: real chapters score a median
+of 1.5, this pipeline's chapters 25.5. Each chapter is written to its own tempo,
+drawn from the corpus distribution rather than to one book-wide target, and the
+rewrite pass only asks for the specific things a chapter measurably lacks. Step
+3 reports whether the finished book varies chapter to chapter as much as a real
+novel does. `AI_BOOK_HUMANIZE=0` turns the whole thing off, and `judge_models`
+in the provider config adds cross-family LLM judges on top of the stylometry.
 
 Useful environment variables:
 
@@ -149,6 +190,7 @@ PYTHONPATH=. python -m ai_book_creator.project_cli list
 3. Step 2: Write chapters to `book_output/`
 4. Step 3: Review and expand the manuscript if needed
 5. Step 4: Export the final EPUB
+6. Step 5: Create the cover and KDP upload package
 
 The pipeline supports:
 
@@ -158,6 +200,77 @@ The pipeline supports:
 - Chapter checkpoints
 - Budget-aware pausing and resuming
 - EPUB export with a generated back-cover description
+- Review mode with idea, layout, structure, and between-book approval
+- Automatic idea pitching/selection with randomized page and chapter ranges
+- KDP-sized JPEG covers with reliable title and author typography
+- KDP metadata, AI-disclosure fields, and an upload checklist
+
+## Review and automatic modes
+
+The normal reviewed flow remains interactive:
+
+```bash
+python main.py --mode review --author "Your Name"
+```
+
+For an automatic generation run, provide a configured text provider. Pollinations
+is the default cover source and downloads the generated background directly,
+without Chrome or an API key:
+
+```bash
+python main.py --mode auto --provider openai --author "Your Name" --pages 180-280 --chapters 12-20 --fresh
+```
+
+For a series, add `--series 3`. Automatic mode pitches several concepts and plot
+directions to the AI, has it select and improve one, randomizes the book length
+inside the supplied ranges, and continues through every book.
+
+To keep creating unrelated books until you press Ctrl+C or the provider stops
+accepting requests, add `--continuous`:
+
+```bash
+python main.py --mode auto --provider openai-oauth --author "Your Name" --pages 180-280 --chapters 12-20 --continuous --fresh
+```
+
+Each completed KDP package is archived under `book_output/archive/ebooks/`
+before the next book starts. If a run is interrupted or rejected by the
+provider, its current progress remains resumable.
+
+The equivalent explicit option is:
+
+```bash
+python main.py --mode review --cover-source pollinations
+```
+
+Pollinations currently supports keyless image requests. Set `POLLINATIONS_API_KEY`
+only if you want to use its authenticated API. Perchance remains available as a
+browser-based fallback; its saved profile is under `book_output/browser_profile/`,
+and any Cloudflare or CAPTCHA verification must be completed manually:
+
+```bash
+python main.py --mode review --cover-source perchance
+```
+
+You can also generate or choose a background yourself and supply it up front:
+
+```bash
+python main.py --mode review --cover-background "C:\covers\background.jpg"
+```
+
+To upload, preview, price at $0.99, and submit the completed eBook through KDP:
+
+```bash
+python main.py --mode auto --provider openai-oauth --publish-kdp --fresh
+```
+
+KDP publishing is headless by default and reuses `AI_BOOK_KDP_PROFILE`. For the
+first login or troubleshooting, add `--kdp-visible`; the authenticated profile
+is reused by later headless runs. The automation records its current KDP page in
+the `_kdp.json` package so an interrupted run resumes the same draft.
+
+The submitted defaults are worldwide rights, DRM on, KDP Select off, 35%
+royalty, and the lowest US list price ($0.99). Generated category paths and AI
+tool disclosures remain in the package for inspection.
 
 ## Output files
 
@@ -173,6 +286,9 @@ Generated artifacts live in `book_output/`:
 - `checkpoint_*.json` — chapter/structure checkpoints
 - `ebook/<title>.epub` — exported EPUB
 - `ebook/<title>_cover_prompt.txt` — cover prompt text
+- `ebook/<title>_cover.jpg` — 1600×2560 KDP cover, when a background is available
+- `ebook/<title>_kdp.json` — title metadata, keywords, categories, files, and AI disclosure
+- `ebook/<title>_KDP_CHECKLIST.txt` — KDP upload settings and fallback checklist
 
 ## Tests
 
@@ -180,6 +296,7 @@ Run the test suite with:
 
 ```bash
 PYTHONPATH=. python3 -m unittest discover -s tests -v
+PYTHONPATH=. python3 -m unittest test_publish_pipeline -v
 ```
 
 ## Notes

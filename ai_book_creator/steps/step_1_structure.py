@@ -2,12 +2,57 @@
 Step 1: Create Structure - Chapter breakdown with plots
 """
 
+import os
+import random
 import re
 import time
+import zlib
 from typing import Dict, Any, List, Optional
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
+from ..utils import humanizer
 from ..utils.name_generator import generate_name_pools, pick_random_name
+
+
+def chapter_budget(chapter_count: int, total_words: int, seed: int = 0) -> List[int]:
+    """Per-chapter word budgets shaped like a real novel's, summing to the target.
+
+    Published chapters are not all one size: measured over 591 chapters of the
+    reference corpus, the ratio of a chapter to its book's median runs 0.27 at
+    the 2nd percentile and 2.22 at the 98th, and 8% of chapters are under half
+    the median (benchmarks/measure_chapter_shape.py). We sample that empirical
+    quantile curve once per stratum, so a book gets the whole spread rather than
+    one repeated number. Missing baseline -> flat budgets, as before.
+    """
+    if chapter_count < 3:
+        return [max(400, total_words // max(1, chapter_count))] * max(1, chapter_count)
+
+    shape = (humanizer.baseline() or {}).get("chapter_shape", {}).get("ratio_to_median")
+    if not shape:
+        return [max(400, total_words // chapter_count)] * chapter_count
+
+    anchors = sorted((int(k[1:]) / 100, float(v)) for k, v in shape.items())
+    rng = random.Random(seed)
+
+    def ratio(u: float) -> float:
+        if u <= anchors[0][0]:
+            return anchors[0][1]
+        for (q0, r0), (q1, r1) in zip(anchors, anchors[1:]):
+            if u <= q1:
+                return r0 + (r1 - r0) * (u - q0) / (q1 - q0)
+        return anchors[-1][1]
+
+    # One draw per equal-probability stratum reproduces the measured spread even
+    # for a 12-chapter book, where plain sampling would usually miss both tails.
+    ratios = [ratio((i + rng.random()) / chapter_count) for i in range(chapter_count)]
+    rng.shuffle(ratios)
+    # Opening chapters carry the setup; novels rarely start on the runt.
+    if ratios[0] < 0.8:
+        longest = max(range(chapter_count), key=ratios.__getitem__)
+        ratios[0], ratios[longest] = ratios[longest], ratios[0]
+
+    scale = total_words / sum(ratios)
+    return [max(400, int(round(r * scale / 50)) * 50) for r in ratios]
 
 
 class StructureStep(BaseStep):
@@ -81,6 +126,15 @@ class StructureStep(BaseStep):
             print("📌 Reusing cached chapter structure from a previous run.")
 
         chapters = self._extract_chapters(structure_content)
+
+        # The model copies the assigned budgets unreliably, so the budget wins:
+        # this is what keeps chapter lengths uneven and the book total on target.
+        if chapters:
+            budget = self._chapter_budget(init_data, len(chapters))
+            for chapter, words in zip(chapters, budget):
+                chapter["word_count_estimate"] = words
+            print(f"📏 Chapter budgets: {min(budget)}-{max(budget)} words, "
+                  f"{sum(budget):,} total")
 
         # Create plots for each chapter (now with name pools injected)
         chapter_plots = self._create_plots(chapters, init_data, name_pools)
@@ -184,6 +238,9 @@ class StructureStep(BaseStep):
         prompt, max_completion_tokens = self._build_structure_prompt(init_data)
         structure = self.ai_service.generate_content(prompt, max_completion_tokens=max_completion_tokens)
 
+        if os.getenv("AI_BOOK_MODE", "review").strip().lower() == "auto":
+            return structure
+
         # Interactive loop for adjusting structure
         while True:
             print("\n📚 CURRENT CHAPTER STRUCTURE:")
@@ -227,14 +284,14 @@ class StructureStep(BaseStep):
         # User-validated chapter count from Step 0; fall back to ~3000 wpc if absent
         # (e.g. projects saved before the chapter-count prompt existed).
         chapter_count = int(init_data.get("chapter_count") or max(10, target_word_count // 3000))
-        words_per_chapter = int(init_data.get("words_per_chapter") or max(1500, target_word_count // chapter_count))
-        per_chapter_target = words_per_chapter
-        chapter_word_low = int(per_chapter_target * 0.9)
-        chapter_word_high = int(per_chapter_target * 1.1)
+        budget = self._chapter_budget(init_data)
+        budget_text = ", ".join(f"{i}:{w}" for i, w in enumerate(budget, 1))
         opening_style_list = (
             "in medias res, dialogue-led, sensory close-up, object-focused, institutional briefing, "
-            "procedural action, quiet reflection, cross-cut, suspense hook"
+            "procedural action, quiet reflection, cross-cut, suspense hook, comic friction, aftermath, "
+            "misdirection, intimate confession, failed routine, consequential omission"
         )
+        creative_lens = self._truncate_text(init_data.get("creative_lens", ""), 180)
 
         if is_groq:
             prompt = self.ai_service.build_sectioned_prompt(
@@ -245,6 +302,7 @@ class StructureStep(BaseStep):
                 sections=[
                     ("Book idea", book_idea),
                     ("Layout summary", layout_content),
+                    ("Creative constraint", creative_lens),
                     *(
                         [("Series layout", series_layout)]
                         if series_mode and series_layout
@@ -257,8 +315,12 @@ class StructureStep(BaseStep):
                         f"{opening_style_list}. "
                         "Keep Summary to 15-20 words after the tag. Keep Key events to at most 3 short phrases "
                         "separated by semicolons. Vary opening style tags across adjacent chapters so the structure "
-                        f"feels scene-specific and novelistic. Use exactly {chapter_count} chapters. Word count must be a single integer "
-                        f"around {per_chapter_target} (range {chapter_word_low}-{chapter_word_high}).",
+                        f"feels scene-specific and novelistic. Use exactly {chapter_count} chapters. "
+                        "The Word count column is fixed: copy the assigned budget for that chapter, "
+                        f"in chapter:words form here — {budget_text}. "
+                        "Scale each chapter's scope to its budget: a short budget is one scene or a single beat, "
+                        "a long budget carries several. Avoid a mechanically alternating pattern or evenly "
+                        "spaced reversals.",
                     ),
                 ],
                 max_prompt_tokens=3000,
@@ -266,7 +328,7 @@ class StructureStep(BaseStep):
                     "Book idea": 180,
                     "Layout summary": 700,
                     "Series layout": 450,
-                    "Output rules": 260,
+                    "Output rules": 700,
                 },
             )
             return prompt, 32000
@@ -279,6 +341,7 @@ class StructureStep(BaseStep):
             sections=[
                 ("Book idea", book_idea),
                 ("Layout summary", layout_content),
+                ("Creative constraint", creative_lens),
                 *(
                     [("Series layout", series_layout)]
                     if series_mode and series_layout
@@ -293,9 +356,13 @@ class StructureStep(BaseStep):
                     "For every chapter, include an opening style tag chosen from: "
                     f"{opening_style_list}. "
                     "Vary the opening style tag from chapter to chapter so adjacent chapters do not feel mechanically similar. "
-                    f"Then write a 2-3 sentence summary, key events, and a word count estimate of "
-                    f"{chapter_word_low}-{chapter_word_high} words. "
-                    "Keep the chapter openings specific, concrete, and distinct in tone and sentence shape.",
+                    "Then write a 2-3 sentence summary, key events, and end the line with "
+                    "'Word count: N', where N is that chapter's assigned budget. "
+                    f"The budgets are fixed and deliberately uneven, in chapter:words form — {budget_text}. "
+                    "Scale each chapter's scope to its own budget: a short budget is one scene or a single "
+                    "beat, seen through one viewpoint, and a long budget carries several. Do not place "
+                    "revelations, reversals, or quiet chapters at mechanically regular intervals. Keep "
+                    "openings specific, concrete, and distinct in tone and sentence shape.",
                 ),
             ],
             max_prompt_tokens=8000,
@@ -303,11 +370,20 @@ class StructureStep(BaseStep):
                 "Book idea": 250,
                 "Layout summary": 2500,
                 "Series layout": 1200,
-                "Output rules": 450,
+                "Output rules": 900,
             },
         )
         return prompt, 32000
     
+    def _chapter_budget(self, init_data: Dict, chapter_count: int = 0) -> List[int]:
+        """The book's word budgets. Seeded on the idea, so a resume rebuilds them."""
+        page_count = int(init_data.get("page_count", 400))
+        words_per_page = int(init_data.get("words_per_page", 250))
+        total = int(init_data.get("target_word_count") or page_count * words_per_page)
+        count = chapter_count or int(init_data.get("chapter_count") or max(10, total // 3000))
+        seed = zlib.crc32(init_data.get("book_idea", "").encode("utf-8", "replace"))
+        return chapter_budget(count, total, seed)
+
     def _extract_chapters(self, content: str) -> List[Dict]:
         chapters = []
         lines = content.split('\n')
@@ -519,10 +595,13 @@ class StructureStep(BaseStep):
 
             print(f"Creating plot for Chapter {chapter_number}: {chapter.get('title', f'Chapter {chapter_number}')}")
 
+            budget = int(chapter.get("word_count_estimate", 1500))
+            events = "1-2 key events" if budget < 1200 else "2-3 key events" if budget < 2500 else "3-5 key events"
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     f"Create a detailed plot outline for Chapter {chapter_number}: "
                     f"{chapter.get('title', f'Chapter {chapter_number}')}. "
+                    f"The chapter is {budget} words long, so outline only what fits that length. "
                     "Be detailed but concise. "
                     "When introducing new characters, use names from the provided name pools. "
                     "If a character already exists in the glossary, reuse that name."
@@ -532,7 +611,7 @@ class StructureStep(BaseStep):
                     *([("Series layout", series_layout)] if series_layout else []),
                     ("Chapter summary", chapter.get("content", "")),
                     ("Opening style tag", chapter.get("opening_style", "")),
-                    ("Requirements", "Opening scene; 3-5 key events; character interactions; conflict/tension; chapter ending/transition; emotional beats."),
+                    ("Requirements", f"Opening scene; {events}; character interactions; conflict/tension; chapter ending/transition; emotional beats."),
                     ("Name pools", name_pools_text),
                 ],
                 max_prompt_tokens=7000,
