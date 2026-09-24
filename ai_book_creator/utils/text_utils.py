@@ -53,6 +53,22 @@ def parse_json(raw: str):
     return None
 
 
+def ask_json(ai_service, prompt: str, validate, error: str, attempts: int = 3, **kwargs) -> dict:
+    """Ask for a JSON object; re-ask with the defect named, then raise `error`.
+
+    `validate(result)` returns a description of what is wrong, or None when the
+    reply is usable. Provider errors (truncation, limits) propagate untouched.
+    """
+    feedback = ""
+    for _ in range(attempts):
+        result = parse_json(ai_service.generate_content(prompt + feedback, **kwargs))
+        problem = "the reply was not a JSON object" if result is None else validate(result)
+        if not problem:
+            return result
+        feedback = f"\n\nYOUR PREVIOUS REPLY WAS REJECTED: {problem}. Return JSON only."
+    raise ValueError(f"{error} ({problem})")
+
+
 def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 

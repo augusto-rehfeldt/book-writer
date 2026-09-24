@@ -10,7 +10,7 @@ from ..core.project_manager import BrokenProjectStateError
 from ..models.chapter_model import Chapter
 from ..utils import humanizer
 from ..utils.editorial import edit_text, story_context, update_continuity
-from ..utils.text_utils import calculate_page_count, calculate_word_count, parse_json, save_text, text_chunks, text_digest
+from ..utils.text_utils import ask_json, calculate_page_count, calculate_word_count, save_text, text_chunks, text_digest
 
 
 class ReviewStep(BaseStep):
@@ -199,11 +199,14 @@ class ReviewStep(BaseStep):
                 f"PASSAGE {index} OF {len(passages)} "
                 f"({'FINAL MANUSCRIPT PASSAGE: assess the ending' if index == len(passages) else 'book continues'}):\n{passage}"
             )
-            result = parse_json(self.ai_service.generate_content(
-                prompt, model_type="review", max_completion_tokens=3072))
-            if (not result or not isinstance(result.get("analysis"), str) or not result["analysis"].strip()
-                    or len(result["analysis"].split()) > 1000 or not isinstance(result.get("issues"), list)):
-                raise ValueError("Incomplete manuscript analysis; review remains resumable")
+            result = ask_json(
+                self.ai_service, prompt,
+                lambda r: None if (isinstance(r.get("analysis"), str) and r["analysis"].strip()
+                                   and len(r["analysis"].split()) <= 1000
+                                   and isinstance(r.get("issues"), list))
+                else '"analysis" must be a non-empty string of at most 700 words and "issues" a list',
+                "Incomplete manuscript analysis; review remains resumable",
+                model_type="review", max_completion_tokens=3072)
             memo = result["analysis"]
             issues.extend(issue for issue in result["issues"] if isinstance(issue, dict)
                           and isinstance(issue.get("chapter_number"), int)

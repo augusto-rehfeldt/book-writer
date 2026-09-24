@@ -29,7 +29,12 @@ AI book generation pipeline: idea → structure → chapters → review → EPUB
 and remembers it in `book_output/provider_state.json`.
 At menu time `cli._live_model_ids` asks the provider what it serves
 (`/models`, or `cmdc --list-models`) and hides curated ids it has retired;
-offline, the curated list shows as is. New models still get added by hand.
+served ids missing from the config join the menu when models.dev reports their
+output limit. Offline, the curated list shows as is.
+`cli.choose_ai` is the one provider/model menu for every AIService script:
+mathforge and music writer call it with their own state file and roles.
+opencode.ai rejects calls without an `x-opencode-session` header;
+`AIService._extra_headers` adds one per service.
 Menus print context, max output and list price per 1M tokens from models.dev
 (`cli._model_facts`; opencode's `~/.cache/opencode/models.json` when under a day
 old, else live). Display only: the config's `max_output` is still the cap sent.

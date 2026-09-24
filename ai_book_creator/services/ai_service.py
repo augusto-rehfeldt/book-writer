@@ -10,6 +10,7 @@ import subprocess
 import time
 import tempfile
 import threading
+import uuid
 from contextlib import contextmanager
 from functools import wraps
 from datetime import datetime
@@ -1041,10 +1042,9 @@ class AIService:
                 kwargs = {"api_key": self.api_key, "base_url": self.base_url}
                 if self.client_max_retries is not None:
                     kwargs["max_retries"] = self.client_max_retries
-                if self.provider == "openrouter":
-                    headers = self.config.get("headers")
-                    if isinstance(headers, dict):
-                        kwargs["default_headers"] = headers
+                headers = self._extra_headers()
+                if headers:
+                    kwargs["default_headers"] = headers
                 self.client = OpenAI(**kwargs)
                 if self.provider == "groq":
                     print("Using OpenAI-compatible client for Groq")
@@ -1070,10 +1070,19 @@ class AIService:
                 "Authorization": f"Bearer {self.api_key}",
             }
         )
-        headers = self.config.get("headers")
-        if isinstance(headers, dict):
-            self.session.headers.update(headers)
+        self.session.headers.update(self._extra_headers())
         print("Using HTTP session for requests to:", self.base_url)
+
+    def _extra_headers(self) -> Dict[str, str]:
+        """Config headers, plus the session id opencode.ai now requires: without
+        x-opencode-session its gateway answers every call with 400 MissingSessionID."""
+        headers = self.config.get("headers")
+        headers = dict(headers) if isinstance(headers, dict) else {}
+        if "opencode.ai" in (self.base_url or ""):
+            if not getattr(self, "_opencode_session", None):
+                self._opencode_session = uuid.uuid4().hex
+            headers.setdefault("x-opencode-session", self._opencode_session)
+        return headers
 
     def _extract_text_from_response(self, resp: Any) -> str:
         """

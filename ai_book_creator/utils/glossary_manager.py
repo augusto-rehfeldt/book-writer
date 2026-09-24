@@ -8,7 +8,7 @@ import re
 import random
 from datetime import datetime
 from typing import Dict, List, Any, Optional
-from .text_utils import parse_json, save_text, text_chunks
+from .text_utils import ask_json, save_text, text_chunks
 
 class GlossaryManager:
     def __init__(self, output_dir: str):
@@ -104,17 +104,18 @@ class GlossaryManager:
                 f"EARLIER PASSAGES:\n{json.dumps(collected, ensure_ascii=False)}\n"
                 f"CHAPTER: {chapter_title}\nPASSAGE:\n{passage}"
             )
-            result = parse_json(ai_service.generate_content(prompt, model_type="review", max_completion_tokens=2048))
-            if not isinstance(result, dict):
-                raise ValueError("Invalid glossary extraction; previous glossary retained")
+            # Models omit empty categories, send null, or key entries by name.
+            result = ask_json(
+                ai_service, prompt,
+                lambda r: next((f'"{c}" must be an array of objects' for c in collected
+                                if not isinstance(r.get(c) or [], (list, dict))), None),
+                "Invalid glossary extraction; previous glossary retained",
+                model_type="review", max_completion_tokens=2048)
             for category in collected:
-                # Models omit empty categories, send null, or key entries by name.
                 entries = result.get(category) or []
                 if isinstance(entries, dict):
                     entries = [v if isinstance(v, dict) else {"name": k, "description": v}
                                for k, v in entries.items()]
-                if not isinstance(entries, list):
-                    raise ValueError(f"Invalid glossary category: {category}")
                 for entry in entries:
                     if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
                             or not entry["name"].strip() or not isinstance(entry.get("description"), str)):

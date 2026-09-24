@@ -15,6 +15,8 @@ from selenium.common.exceptions import ElementClickInterceptedException, Timeout
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
+from .text_utils import ask_json
+
 
 KDP_ROOT = "https://kdp.amazon.com/en_US"
 
@@ -190,20 +192,20 @@ def _ai_category_choices(
         ],
         max_prompt_tokens=3000,
     )
+    def problem(result):
+        picked = result.get("choices")
+        if (not isinstance(picked, list) or len(picked) != count
+                or not all(isinstance(i, int) and 1 <= i <= len(choices) for i in picked)
+                or len(set(picked)) != count):
+            return f'"choices" must hold {count} distinct numbers from 1 to {len(choices)}'
+        return None
+
     try:
-        raw = ai_service.generate_content(prompt, max_completion_tokens=100)
-        match = re.search(r"\{.*\}", raw, re.DOTALL)
-        indexes = json.loads(match.group(0) if match else raw)["choices"]
-        indexes = [int(index) - 1 for index in indexes]
-        if (
-            len(indexes) != count
-            or len(set(indexes)) != count
-            or any(index < 0 or index >= len(choices) for index in indexes)
-        ):
-            raise ValueError
-        return [choices[index] for index in indexes]
-    except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        indexes = ask_json(ai_service, prompt, problem, "AI did not choose valid live KDP categories",
+                           max_completion_tokens=100)["choices"]
+    except ValueError as exc:
         raise KdpPublishError("AI did not choose valid live KDP categories.") from exc
+    return [choices[index - 1] for index in indexes]
 
 
 def _category_placements(driver) -> list[tuple[object, str]]:

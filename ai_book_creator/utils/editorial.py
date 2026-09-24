@@ -2,7 +2,7 @@
 
 import re
 
-from .text_utils import parse_json, text_chunks, text_digest
+from .text_utils import ask_json, parse_json, text_chunks, text_digest
 
 
 EDITORIAL_CRITERIA = (
@@ -27,6 +27,16 @@ def story_context(init_data: dict, memory: str = "", glossary: str = "") -> str:
     )
 
 
+def _continuity_problem(result: dict):
+    value = result.get("continuity")
+    if not isinstance(value, str) or not value.strip():
+        return 'expected a non-empty "continuity" string'
+    if len(value.split()) > 900:
+        return (f"the record ran to {len(value.split())} words; condense it to at most "
+                "600 words, merging settled facts and keeping unresolved ones")
+    return None
+
+
 def update_continuity(ai_service, text: str, previous: str = "", title: str = "") -> str:
     """Read every passage, carrying forward a compact factual record."""
     memory = previous
@@ -41,12 +51,10 @@ def update_continuity(ai_service, text: str, previous: str = "", title: str = ""
             "Keep the record factual, with no critique or invented explanations.\n\n"
             f"PREVIOUS RECORD:\n{memory}\n\nCHAPTER: {title}, passage {index}\n{passage}"
         )
-        result = parse_json(ai_service.generate_content(
-            prompt, model_type="review", max_completion_tokens=2048))
-        value = result.get("continuity") if result else None
-        if not isinstance(value, str) or not value.strip() or len(value.split()) > 900:
-            raise ValueError(f"Invalid continuity record for {title}; original manuscript retained")
-        memory = value.strip()
+        memory = ask_json(
+            ai_service, prompt, _continuity_problem,
+            f"Invalid continuity record for {title}; original manuscript retained",
+            model_type="review", max_completion_tokens=2048)["continuity"].strip()
     return memory
 
 
@@ -149,12 +157,13 @@ def edit_text(ai_service, text: str, instruction: str, context: str = "", *,
             f"DIAGNOSTIC HINTS (verify against this passage): {hints}\n\n"
             f"{neighbors}\n\nPASSAGE TO EDIT:\n{passage}"
         )
-        result = parse_json(ai_service.generate_content(
-            prompt, model_type="review", max_completion_tokens=4096))
-        if (not result or not isinstance(result.get("summary"), str)
-                or not isinstance(result.get("issues"), list)
-                or not isinstance(result.get("edits"), list)):
-            raise ValueError("Incomplete editorial response; manuscript retained for retry")
+        result = ask_json(
+            ai_service, prompt,
+            lambda r: None if (isinstance(r.get("summary"), str) and isinstance(r.get("issues"), list)
+                               and isinstance(r.get("edits"), list))
+            else '"summary" must be a string and "issues" and "edits" must be lists',
+            "Incomplete editorial response; manuscript retained for retry",
+            model_type="review", max_completion_tokens=4096)
         report = {"passage": index + 1, "source_hash": text_digest(passage),
                   "summary": result["summary"], "issues": result["issues"],
                   "edits": result["edits"], "accepted": False}

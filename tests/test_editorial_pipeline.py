@@ -77,7 +77,7 @@ class PassageSafetyTests(unittest.TestCase):
 
     def test_malformed_editorial_output_cannot_count_as_review(self):
         with self.assertRaises(ValueError):
-            editorial.edit_text(service("Here is the rewritten chapter"), PROSE, "Review")
+            editorial.edit_text(service(*["Here is the rewritten chapter"] * 3), PROSE, "Review")
 
     def test_save_preserves_original_and_survives_failed_replace(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -110,6 +110,15 @@ class CoverageTests(unittest.TestCase):
         self.assertIn("PRIOR_SECRET", prompts[0])
         self.assertIn("LATE_REVELATION", prompts[-1])
         self.assertIn("Bob has not learned", prompts[-1])
+
+    def test_rejected_reply_is_re_asked_with_the_reason_then_fails(self):
+        ai = service(json.dumps({"continuity": "fact " * 950}), json.dumps({"continuity": "Alice has the key."}))
+        self.assertEqual(editorial.update_continuity(ai, PROSE, "", "Arrival"), "Alice has the key.")
+        self.assertIn("950 words", ai.generate_content.call_args_list[1].args[0])
+        ai = service(*["not json"] * 3)
+        with self.assertRaisesRegex(ValueError, "Invalid continuity record"):
+            editorial.update_continuity(ai, PROSE, "", "Arrival")
+        self.assertEqual(ai.generate_content.call_count, 3)
 
     def test_analysis_covers_late_chapters(self):
         ai = service(*[json.dumps({"analysis": "The earlier key remains unresolved.", "issues": []})] * 4)
@@ -181,7 +190,7 @@ class ResumeTests(unittest.TestCase):
                 "chapter_1": {"filename": str(path), "title": "Arrival", "chapter_number": 1,
                               "word_count": len(PROSE.split())}}}}
             ai = service(json.dumps({"summary": "Alice waits", "issues": [], "edits": [EDIT]}),
-                         verdict("B"), verdict("A"), "invalid")
+                         verdict("B"), verdict("A"), *["invalid"] * 3)
             with self.assertRaises(ValueError):
                 ReviewStep(ai, pm, directory).execute()
             resumed = ProjectManager(directory)
@@ -197,7 +206,7 @@ class ResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pm = ProjectManager(directory)
             source = "Early scene. " * 1500 + "LAST_PASSAGE"
-            ai = service(json.dumps({"analysis": "KNOWN_SECRET", "issues": []}), "invalid")
+            ai = service(json.dumps({"analysis": "KNOWN_SECRET", "issues": []}), *["invalid"] * 3)
             with self.assertRaises(ValueError):
                 ReviewStep(ai, pm, directory)._generate_analysis({}, source)
             resumed = ProjectManager(directory)
@@ -265,7 +274,7 @@ class ResumeTests(unittest.TestCase):
                 "chapter_1": {"chapter_number": 1, "title": "Arrival", "plot_outline": "Alice waits.",
                               "word_count_estimate": 400}}}}
             draft = "# Arrival\n\n" + PROSE
-            ai = service(draft, json.dumps({"summary": "Alice waits", "issues": [], "edits": []}), "invalid")
+            ai = service(draft, json.dumps({"summary": "Alice waits", "issues": [], "edits": []}), *["invalid"] * 3)
             with patch.object(WriteStep, "_load_config", return_value={}), patch.object(humanizer, "enabled", return_value=False):
                 writer = WriteStep(ai, pm, None, directory)
                 with self.assertRaises(ValueError):

@@ -183,6 +183,12 @@ def _load_catalogue(provider: str) -> dict:
     live = _live_model_ids(provider) if provider != "claude" else None
     if live and any(mid in live for mid in out):
         out = {mid: entry for mid, entry in out.items() if mid in live}
+        # And offer what the provider added since the list was curated, when
+        # models.dev can say how much it writes (skips image/embedding ids).
+        for mid in sorted(live - set(out)):
+            max_out = int((_model_facts(provider, mid).get("limit") or {}).get("output") or 0)
+            if max_out:
+                out[mid] = [mid, max_out]
     if not out:
         fallback = (
             {"deepseek-v4-flash-free": ["DeepSeek V4 Flash Free", 128000]}
@@ -217,10 +223,11 @@ PROJECT_ARTIFACT_PATTERNS = (
 )
 
 
-def _load_provider_state() -> dict:
+def _load_provider_state(state_file: Path | None = None) -> dict:
+    state_file = state_file or PROVIDER_STATE_FILE
     try:
-        if PROVIDER_STATE_FILE.exists():
-            with PROVIDER_STATE_FILE.open("r", encoding="utf-8") as f:
+        if state_file.exists():
+            with state_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
@@ -229,8 +236,8 @@ def _load_provider_state() -> dict:
     return {}
 
 
-def _load_last_provider(default_provider: str = "google") -> str:
-    data = _load_provider_state()
+def _load_last_provider(default_provider: str = "google", state_file: Path | None = None) -> str:
+    data = _load_provider_state(state_file)
     provider = str(data.get("provider", "")).lower()
     if provider in PROVIDER_CONFIG_MAP:
         return provider
@@ -258,8 +265,9 @@ def _load_last_openai_model(
     default_model: str | None = None,
     options: tuple[str, ...] = OPENAI_MODEL_OPTIONS,
     state_key: str = "openai_model",
+    state_file: Path | None = None,
 ) -> str:
-    data = _load_provider_state()
+    data = _load_provider_state(state_file)
     model = str(data.get(state_key, "")).lower()
     if model in options:
         return model
@@ -268,8 +276,10 @@ def _load_last_openai_model(
 
 
 def _save_last_provider(provider: str, openai_model: str | None = None,
-                        catalogue_model: str | None = None) -> None:
-    data = _load_provider_state()
+                        catalogue_model: str | None = None,
+                        state_file: Path | None = None, extra: dict | None = None) -> None:
+    state_file = state_file or PROVIDER_STATE_FILE
+    data = _load_provider_state(state_file)
     provider = provider.lower()
     data["provider"] = provider
     if openai_model is not None:
@@ -283,9 +293,10 @@ def _save_last_provider(provider: str, openai_model: str | None = None,
             data[key] = catalogue_model.lower()
         elif str(data.get(key, "")).lower() not in models:
             data[key] = next(iter(models))
+    data.update(extra or {})
 
-    PROVIDER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with PROVIDER_STATE_FILE.open("w", encoding="utf-8") as f:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with state_file.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
@@ -344,6 +355,7 @@ def _load_openai_oauth_models() -> dict[str, tuple[int | None, int | None]]:
 def _prompt_openai_model(
     default_model: str,
     model_info: dict[str, tuple[int | None, int | None]] | None = None,
+    role: str = "",
 ) -> str:
     options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
     print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
@@ -358,7 +370,7 @@ def _prompt_openai_model(
         print(f"  {index:2d}. {model:<{width}}  {_facts_label(info)}{marker}")
     paid_by = "; your ChatGPT subscription pays" if model_info is not None else ""
     print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
-    prompt = f"Choose model number or id [default: {default_model}]: "
+    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
 
     while True:
         try:
@@ -395,13 +407,16 @@ def _default_catalogue_model(provider: str) -> str:
     return next(iter(models))
 
 
-def _load_last_catalogue_model(provider: str, default_model: str | None = None) -> str:
+def _load_last_catalogue_model(provider: str, default_model: str | None = None,
+                               state_key: str | None = None, state_file: Path | None = None) -> str:
     models = _provider_models(provider)
-    data = _load_provider_state()
-    model = str(data.get(_model_state_key(provider), "")).lower()
+    data = _load_provider_state(state_file)
+    model = str(data.get(state_key or _model_state_key(provider), "")).lower()
     if model in models:
         return model
-    return default_model or _default_catalogue_model(provider)
+    if default_model and default_model.lower() in models:
+        return default_model.lower()
+    return _default_catalogue_model(provider)
 
 
 PROVIDER_LABELS = {
@@ -414,7 +429,7 @@ PROVIDER_LABELS = {
 }
 
 
-def _prompt_catalogue_model(provider: str, default_model: str) -> str:
+def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -> str:
     models = _provider_models(provider)
     label = PROVIDER_LABELS.get(provider, provider)
     model_ids = list(models.keys())
@@ -427,7 +442,7 @@ def _prompt_catalogue_model(provider: str, default_model: str) -> str:
         print(f"  {i:2d}. {mid:<{width}}  {facts}{marker}")
     paid_by = "; your subscription pays" if provider in SUBSCRIPTION_PROVIDERS else ""
     print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
-    prompt = f"Choose model number or id [default: {default_model}]: "
+    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
 
     while True:
         try:
@@ -571,52 +586,74 @@ def _prepare_fresh_start() -> None:
     _clear_project_output()
 
 
-def run(
-    provider: str,
+def choose_ai(
+    provider: str | None = None,
     mode: str = "review",
-    fresh: bool = False,
-    continuous: bool = False,
-    publish_kdp: bool = False,
-    kdp_visible: bool = False,
-) -> bool:
+    state_file: Path | None = None,
+    roles: tuple[str, ...] = ("writing",),
+    defaults: tuple[str, ...] = (),
+    default_provider: str = "google",
+) -> tuple[str, str, list[str]]:
+    """Provider and model menu shared by every script that uses AIService.
+
+    Book writer, mathforge and music writer all call this one function, so a
+    provider or model added here, or newly served by a provider, shows up in
+    each of them. Asks for the provider unless one is given, then one model per
+    role (the first role writes, the last reviews). mode="auto" asks nothing and
+    reuses the picks remembered in state_file (default: book writer's).
+    Exports AI_CONFIG_PATH, the role models and completion caps; returns
+    (provider, config path, models).
+    """
+    if provider is None:
+        last = _load_last_provider(default_provider, state_file)
+        provider = last if mode == "auto" else _prompt_provider(last)
+    provider = "openai-oauth" if provider == "codex" else provider
     base_config_path = Path(PROVIDER_CONFIG_MAP[provider])
     local_config_path = base_config_path.with_name(base_config_path.stem + ".local.json")
-    
     if local_config_path.exists():
         config_path = str(local_config_path)
         print(f"Loaded local configuration: {local_config_path.name}")
     else:
         config_path = str(base_config_path)
-
     os.environ["AI_CONFIG_PATH"] = config_path
 
-    openai_model = None
-    catalogue_model = None
+    models: list[str] = []
+    state_keys: list[str] = []
+    label = lambda role: role if len(roles) > 1 else ""
     if provider in ("openai", "openai-oauth"):
         model_info = _load_openai_oauth_models() if provider == "openai-oauth" else None
         options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
-        default_model = _load_last_openai_model(
-            "gpt-5.6-terra" if provider == "openai-oauth" else None,
-            options,
-            "openai_oauth_model" if provider == "openai-oauth" else "openai_model",
-        )
-        openai_model = default_model if mode == "auto" else _prompt_openai_model(default_model, model_info)
-        os.environ["AI_WRITING_MODEL"] = openai_model
-        os.environ["AI_REVIEW_MODEL"] = openai_model
-        os.environ["AI_OPENAI_MODEL"] = openai_model
+        base_key = "openai_oauth_model" if provider == "openai-oauth" else "openai_model"
+        for i, role in enumerate(roles):
+            key = base_key if i == 0 else f"{base_key}_{role}"
+            fallback = defaults[i] if i < len(defaults) else (
+                "gpt-5.6-terra" if provider == "openai-oauth" else None)
+            default_model = _load_last_openai_model(fallback, options, key, state_file)
+            models.append(default_model if mode == "auto"
+                          else _prompt_openai_model(default_model, model_info, label(role)))
+            state_keys.append(key)
+        os.environ["AI_WRITING_MODEL"] = models[0]
+        os.environ["AI_REVIEW_MODEL"] = models[-1]
+        os.environ["AI_OPENAI_MODEL"] = models[0]
     elif provider in CATALOGUE_PROVIDERS:
-        default_model = _load_last_catalogue_model(provider)
-        catalogue_model = default_model if mode == "auto" else _prompt_catalogue_model(provider, default_model)
-        _, max_out = _provider_models(provider)[catalogue_model]
-        os.environ["AI_WRITING_MODEL"] = catalogue_model
-        os.environ["AI_REVIEW_MODEL"] = catalogue_model
+        for i, role in enumerate(roles):
+            key = _model_state_key(provider) + ("" if i == 0 else f"_{role}")
+            fallback = defaults[i] if i < len(defaults) else None
+            default_model = _load_last_catalogue_model(provider, fallback, key, state_file)
+            models.append(default_model if mode == "auto"
+                          else _prompt_catalogue_model(provider, default_model, label(role)))
+            state_keys.append(key)
+        os.environ["AI_WRITING_MODEL"] = models[0]
+        os.environ["AI_REVIEW_MODEL"] = models[-1]
         # The Claude Code CLI has no completion-token argument, so its catalogue
         # carries max_output 0 and the caps stay unset.
-        for key in (
-            "AI_WRITING_COMPLETION_TOKENS",
-            "AI_REVIEW_COMPLETION_TOKENS",
-            "AI_PLANNING_COMPLETION_TOKENS",
-            "AI_DEFAULT_COMPLETION_TOKENS",
+        write_out = _provider_models(provider)[models[0]][1]
+        review_out = _provider_models(provider)[models[-1]][1]
+        for key, max_out in (
+            ("AI_WRITING_COMPLETION_TOKENS", write_out),
+            ("AI_REVIEW_COMPLETION_TOKENS", review_out),
+            ("AI_PLANNING_COMPLETION_TOKENS", write_out),
+            ("AI_DEFAULT_COMPLETION_TOKENS", write_out),
         ):
             if max_out:
                 os.environ[key] = str(max_out)
@@ -626,10 +663,32 @@ def run(
         # No model menu for these providers; still show what the config runs on.
         with open(config_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-        for mid in dict.fromkeys(filter(None, (data.get("writing_model"), data.get("review_model")))):
+        writing = data.get("writing_model") or ""
+        review = data.get("review_model") or writing
+        for mid in dict.fromkeys(filter(None, (writing, review))):
             print(f"Model {mid}: {_facts_label(_model_facts(provider, mid))} ($ per 1M in/out)")
+        models = [writing] + [review] * (len(roles) - 1)
 
-    _save_last_provider(provider, openai_model, catalogue_model)
+    first = models[0] if state_keys else None
+    _save_last_provider(
+        provider,
+        first if provider in ("openai", "openai-oauth") else None,
+        first if provider in CATALOGUE_PROVIDERS else None,
+        state_file,
+        dict(zip(state_keys[1:], models[1:])),
+    )
+    return provider, config_path, models
+
+
+def run(
+    provider: str,
+    mode: str = "review",
+    fresh: bool = False,
+    continuous: bool = False,
+    publish_kdp: bool = False,
+    kdp_visible: bool = False,
+) -> bool:
+    choose_ai(provider, mode)
 
     if fresh:
         if mode == "auto":
