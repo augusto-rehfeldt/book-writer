@@ -7,9 +7,10 @@ import json
 import os
 import re
 import shutil
+import subprocess
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 # ponytail: load_local_env() runs once in ai_book_creator/__init__.py on import.
 from .core.book_creator import AIBookCreator
@@ -42,6 +43,31 @@ PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
 
 
+def _live_model_ids(provider: str) -> set[str] | None:
+    """Model ids the provider serves right now, or None when it can't be asked."""
+    try:
+        if provider == "commandcode":
+            listing = subprocess.run(
+                [shutil.which("cmdc") or "cmdc", "--list-models"],
+                capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
+            ).stdout
+            return {line.split()[0].lower() for line in listing.splitlines() if line.strip()}
+        with open(PROVIDER_CONFIG_MAP[provider], "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data.get("base_url"):
+            return None
+        # opencode's CDN answers urllib's default User-Agent with a 403.
+        req = Request(data["base_url"].rstrip("/") + "/models",
+                      headers={"User-Agent": "ai-book-creator"})
+        key = os.environ.get(data.get("api_key_env", ""), "")
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        with urlopen(req, timeout=5) as resp:
+            return {str(m["id"]).lower() for m in json.load(resp)["data"]}
+    except Exception:
+        return None
+
+
 def _load_catalogue(provider: str) -> dict:
     # Local config first (carries friendly display names like "GLM-5.2").
     out: dict = {}
@@ -52,18 +78,17 @@ def _load_catalogue(provider: str) -> dict:
             out[str(mid).lower()] = [str(info.get("name", mid)), int(info.get("max_output", 4096))]
     except Exception:
         pass
-    # Then overlay opencode's userspace truth so context/output stays fresh
-    # for the paid opencode-go tier; the zen config already lists its free tier.
-    # ponytail: opencode auth.json also drives the key; this keeps the two in lockstep.
+    # Then overlay the output limits from opencode's userspace config for the
+    # curated opencode-go models; the live listing below decides what exists.
     if provider == "opencode-go":
-        synced = load_opencode_go_sync().get("models", {})
-        for mid, info in synced.items():
+        for mid, info in load_opencode_go_sync().get("models", {}).items():
             if mid in out:
                 out[mid][1] = int(info["max_output"])
-            else:
-                out[mid] = [info.get("name", mid), int(info["max_output"])]
-        if synced:
-            out = {mid: entry for mid, entry in out.items() if mid in synced}
+    # Drop curated ids the provider has retired, so the menu never offers a
+    # dead model. Offline or unreachable: keep the curated list as is.
+    live = _live_model_ids(provider) if provider != "claude" else None
+    if live and any(mid in live for mid in out):
+        out = {mid: entry for mid, entry in out.items() if mid in live}
     if not out:
         fallback = (
             {"deepseek-v4-flash-free": ["DeepSeek V4 Flash Free", 128000]}

@@ -27,6 +27,9 @@ AI book generation pipeline: idea → structure → chapters → review → EPUB
 `cli.PROVIDER_CONFIG_MAP` maps a provider name to its config file; anything in
 `cli.CATALOGUE_PROVIDERS` also picks a model from that config's `models` block
 and remembers it in `book_output/provider_state.json`.
+At menu time `cli._live_model_ids` asks the provider what it serves
+(`/models`, or `cmdc --list-models`) and hides curated ids it has retired;
+offline, the curated list shows as is. New models still get added by hand.
 
 - `claude` — the Claude Code CLI in print mode, on the user's subscription, no
   key. The prompt goes in **on stdin, never in argv**: Windows caps a command
