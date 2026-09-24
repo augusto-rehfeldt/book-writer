@@ -105,16 +105,20 @@ class GlossaryManager:
                 f"CHAPTER: {chapter_title}\nPASSAGE:\n{passage}"
             )
             result = parse_json(ai_service.generate_content(prompt, model_type="review", max_completion_tokens=2048))
-            if not result:
+            if not isinstance(result, dict):
                 raise ValueError("Invalid glossary extraction; previous glossary retained")
             for category in collected:
-                entries = result.get(category)
+                # Models omit empty categories, send null, or key entries by name.
+                entries = result.get(category) or []
+                if isinstance(entries, dict):
+                    entries = [v if isinstance(v, dict) else {"name": k, "description": v}
+                               for k, v in entries.items()]
                 if not isinstance(entries, list):
                     raise ValueError(f"Invalid glossary category: {category}")
                 for entry in entries:
                     if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
                             or not entry["name"].strip() or not isinstance(entry.get("description"), str)):
-                        raise ValueError("Invalid glossary entry")
+                        continue  # one malformed entry must not abort the chapter
                     collected[category][entry["name"]] = entry
         return {key: list(entries.values()) for key, entries in collected.items()}
     
