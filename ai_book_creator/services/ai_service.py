@@ -1518,8 +1518,15 @@ class AIService:
                             print(f"[http] HTTP error {r.status_code}: {r.text}")
                             r.raise_for_status()
 
-            except (DailyTokenBudgetExceeded, UsageLimitExceeded, IncompleteGenerationError, UsageStateError):
+            except (DailyTokenBudgetExceeded, UsageLimitExceeded, UsageStateError):
                 raise
+            except IncompleteGenerationError as e:
+                # Truncated or blocked output is never returned, but the next
+                # attempt may finish; a larger budget helps when the cap cut it.
+                last_error = e
+                completion_tokens *= 2
+                print(f"[{self.provider_label}] Incomplete output on attempt {attempt + 1}; "
+                      f"retrying with {completion_tokens} completion tokens")
             except Exception as e:
                 error_text = str(e).lower()
                 request_too_large = "request_too_large" in error_text or "request entity too large" in error_text

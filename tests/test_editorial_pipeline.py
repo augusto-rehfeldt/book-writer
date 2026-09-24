@@ -101,6 +101,30 @@ class PassageSafetyTests(unittest.TestCase):
             with self.subTest(response=response), self.assertRaises(IncompleteGenerationError):
                 ai._extract_text_from_response(response)
 
+    def test_incomplete_output_is_retried_then_raised_after_five_attempts(self):
+        def reply(finish_reason, text="done"):
+            return SimpleNamespace(choices=[SimpleNamespace(
+                finish_reason=finish_reason, message=SimpleNamespace(content=text))])
+
+        ai = AIService.__new__(AIService)
+        ai.provider = ai.provider_label = "hyper"
+        ai.writing_model = ai.review_model = "m"
+        ai.timeout = 1
+        ai.config = {}
+        ai.client = Mock()
+        ai._reasoning_options = lambda *args, **kwargs: {}
+        create = ai.client.chat.completions.create
+        with patch("ai_book_creator.services.ai_service.time.sleep"):
+            create.side_effect = [reply("length"), reply("stop")]
+            self.assertEqual(ai.generate_content("p", max_completion_tokens=100), "done")
+            self.assertEqual(create.call_args.kwargs["max_tokens"], 200)
+
+            create.reset_mock()
+            create.side_effect = [reply("content_filter")] * 5
+            with self.assertRaises(IncompleteGenerationError):
+                ai.generate_content("p", max_completion_tokens=100)
+            self.assertEqual(create.call_count, 5)
+
 
 class CoverageTests(unittest.TestCase):
     def test_continuity_reads_the_ending_and_carries_prior_knowledge(self):
