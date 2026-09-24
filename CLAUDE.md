@@ -56,6 +56,12 @@ old, else live). Display only: the config's `max_output` is still the cap sent.
   Takes the older `max_tokens` spelling like hyper. Its `judge_models` are
   grok models because that is all the endpoint serves — same-family judges,
   so treat their humanness verdicts as weak signal there.
+- Every request asks for the model's whole output allowance: the config's
+  `models[<id>].max_output` (`_max_output`) when the catalogue lists the model,
+  else the larger of the caller's `max_completion_tokens` and the role default.
+  A caller's cap is a floor, never a ceiling -- a cap only truncates, and a
+  truncated reply costs a whole retry. Retries after truncation double the cap
+  but never past `max_output`.
 - `generate_content(..., model=...)` overrides the role default. That parameter
   exists for the judges and nothing else.
 

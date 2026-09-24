@@ -110,14 +110,15 @@ class PassageSafetyTests(unittest.TestCase):
         ai.provider = ai.provider_label = "hyper"
         ai.writing_model = ai.review_model = "m"
         ai.timeout = 1
-        ai.config = {}
+        ai.config = {"models": {"m": {"max_output": 300}}}
         ai.client = Mock()
         ai._reasoning_options = lambda *args, **kwargs: {}
         create = ai.client.chat.completions.create
         with patch("ai_book_creator.services.ai_service.time.sleep"):
             create.side_effect = [reply("length"), reply("stop")]
             self.assertEqual(ai.generate_content("p", max_completion_tokens=100), "done")
-            self.assertEqual(create.call_args.kwargs["max_tokens"], 200)
+            # the catalogue ceiling is asked for at once, and doubling never passes it
+            self.assertEqual([c.kwargs["max_tokens"] for c in create.call_args_list], [300, 300])
 
             create.reset_mock()
             create.side_effect = [reply("content_filter")] * 5

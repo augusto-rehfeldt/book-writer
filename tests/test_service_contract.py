@@ -65,7 +65,8 @@ class ServiceContractTests(unittest.TestCase):
             self.assertEqual(client.generate_content('question', model_type='review', max_completion_tokens=50, max_retries=1), 'answer')
             sent = client.client.responses.create.call_args.kwargs
             self.assertEqual(sent['reasoning'], {'effort': 'low'})
-            self.assertEqual(sent['max_output_tokens'], 50)
+            # no catalogue for this model: a caller's cap is only a floor under the role default
+            self.assertEqual(sent['max_output_tokens'], client._default_completion_tokens('review'))
             requests_before = client.client.responses.create.call_count
             with patch.object(api.os, 'replace', side_effect=OSError('disk failure')):
                 with self.assertRaises(api.UsageStateError):

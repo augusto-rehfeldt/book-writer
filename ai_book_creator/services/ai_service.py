@@ -1268,6 +1268,20 @@ class AIService:
         result = re.sub(r"<thinking>.*?</thinking>", "", result, flags=re.DOTALL).strip()
         return result
 
+    def _max_output(self, model: str) -> int:
+        """The model's output limit from the config's `models` catalogue; 0 if unknown.
+
+        The Claude Code CLI's catalogue says 0 on purpose: it takes no cap.
+        """
+        models = self.config.get("models") if isinstance(getattr(self, "config", None), dict) else None
+        if not isinstance(models, dict):
+            return 0
+        info = models.get(model) or models.get(str(model).lower()) or {}
+        try:
+            return max(0, int(info.get("max_output") or 0)) if isinstance(info, dict) else 0
+        except (TypeError, ValueError):
+            return 0
+
     def _default_completion_tokens(self, model_type: str) -> int:
         env_key = {
             "writing": "AI_WRITING_COMPLETION_TOKENS",
@@ -1349,7 +1363,12 @@ class AIService:
         # `model` overrides the role default: the humanness judges have to run on
         # a model that did not write the text, or the verdict measures nothing.
         model_to_use = model or (self.writing_model if model_type == "writing" else self.review_model)
-        completion_tokens = max_completion_tokens or self._default_completion_tokens(model_type)
+        # Always ask for the model's whole output allowance. A cap never makes a
+        # reply shorter -- the prompt does that -- it only cuts it off, and a cut
+        # reply is an IncompleteGenerationError that costs a full retry. A
+        # caller's cap is therefore a floor, never a ceiling.
+        ceiling = self._max_output(model_to_use)
+        completion_tokens = ceiling or max(max_completion_tokens or 0, self._default_completion_tokens(model_type))
         payload = {"model": model_to_use, "input": request_prompt}
 
         while attempt < max_retries:
@@ -1612,7 +1631,7 @@ class AIService:
                 # Truncated or blocked output is never returned, but the next
                 # attempt may finish; a larger budget helps when the cap cut it.
                 last_error = e
-                completion_tokens *= 2
+                completion_tokens = min(completion_tokens * 2, ceiling) if ceiling else completion_tokens * 2
                 print(f"[{self.provider_label}] Incomplete output on attempt {attempt + 1}; "
                       f"retrying with {completion_tokens} completion tokens")
             except Exception as e:
