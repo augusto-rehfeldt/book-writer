@@ -8,6 +8,10 @@ import shutil
 import socket
 import subprocess
 import time
+import tempfile
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, List, Tuple
@@ -149,6 +153,44 @@ def claude_chat(model: str, prompt: str, timeout: int = 1800) -> str:
     return out
 
 
+# Command Code ships several launcher names; on Windows `cmd` is the system
+# shell, so prefer the unambiguous alias and fall back through the rest.
+COMMANDCODE_EXECUTABLES = ("cmdc", "commandcode", "command-code")
+
+
+def commandcode_executable() -> str:
+    for name in COMMANDCODE_EXECUTABLES:
+        exe = shutil.which(name) or shutil.which(name + ".cmd")
+        if exe:
+            return exe
+    raise RuntimeError(
+        "The Command Code CLI is not on PATH. Install Command Code or pick another provider."
+    )
+
+
+def commandcode_chat(model: str, prompt: str, timeout: int = 1800) -> str:
+    """One completion from the Command Code CLI in headless mode.
+
+    Same shape as claude_chat: the prompt goes in on stdin, never as an
+    argument, because Windows caps a command line at 32k characters and a
+    chapter-sized prompt blows straight past it.
+    """
+    args = [commandcode_executable(), "-p", "--output-format", "text",
+            "--model", model, "--skip-onboarding"]
+    proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=timeout)
+    out = (proc.stdout or "").strip()
+    if not out:
+        raise RuntimeError(
+            f"commandcode {model} returned no text: {(proc.stderr or '').strip()[:300]}"
+        )
+    return out
+
+
+class IncompleteGenerationError(RuntimeError):
+    """A truncated or blocked response must never become a saved manuscript."""
+
+
 class UsageLimitExceeded(RuntimeError):
     def __init__(
         self,
@@ -194,13 +236,140 @@ class DailyTokenBudgetExceeded(UsageLimitExceeded):
         )
 
 
+class UsageStateError(RuntimeError):
+    """Accounting could not be read or saved; retrying a paid request is unsafe."""
+
+
+_LEDGER_LOCK = threading.RLock()
+_HELD_LEDGERS = threading.local()
+
+
+@contextmanager
+def ledger_lock(path):
+    # ponytail: global in-process lock; per-ledger locks/reservations if throughput matters.
+    with _LEDGER_LOCK:
+        key = str(Path(path).resolve()) if path else None
+        held = getattr(_HELD_LEDGERS, 'paths', set())
+        if key is None or key in held:
+            yield
+            return
+        lock_path = Path(key + '.lock')
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open('a+b') as stream:
+            if os.name == 'nt':
+                import msvcrt
+                if stream.seek(0, os.SEEK_END) == 0:
+                    stream.write(b'0')
+                    stream.flush()
+                stream.seek(0)
+                while True:
+                    try:
+                        msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+                        break
+                    except OSError as exc:
+                        if exc.errno not in (11, 13, 36):
+                            raise
+                        time.sleep(0.05)
+            else:
+                import fcntl
+                fcntl.flock(stream, fcntl.LOCK_EX)
+            _HELD_LEDGERS.paths = held | {key}
+            try:
+                yield
+            finally:
+                _HELD_LEDGERS.paths = held
+                if os.name == 'nt':
+                    stream.seek(0)
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def accounted(method):
+    @wraps(method)
+    def call(self, *args, **kwargs):
+        provider = self.provider
+        if provider not in ('openai', 'groq'):
+            return method(self, *args, **kwargs)
+        path = self.usage_state_path if provider == 'openai' else self.groq_rate_state_path
+        with ledger_lock(path):
+            if provider == 'openai':
+                self._usage_state = self._load_usage_state()
+            else:
+                self._groq_rate_state = self._load_groq_rate_state()
+            return method(self, *args, **kwargs)
+    return call
+
+
+def read_ledger(path, default):
+    if not path or not Path(path).exists():
+        return default
+    try:
+        state = json.loads(Path(path).read_text(encoding='utf-8'))
+        def validate(actual, example):
+            if not isinstance(actual, type(example)):
+                raise ValueError('invalid ledger field type')
+            if isinstance(example, dict):
+                for key, value in example.items():
+                    validate(actual[key], value)
+            elif isinstance(example, int) and not isinstance(example, bool):
+                if isinstance(actual, bool) or actual < 0:
+                    raise ValueError('invalid ledger counter')
+        validate(state, default)
+        datetime.fromisoformat(state['date'])
+        return state
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise UsageStateError(f'Cannot read usage ledger {path}; restore a verified backup before continuing.') from exc
+
+
+def save_ledger(path, payload):
+    if not path:
+        return
+    temporary = None
+    try:
+        target = Path(path)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=target.parent,
+                                         prefix=target.name + '.', suffix='.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(payload, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, target)
+    except (OSError, ValueError, TypeError) as exc:
+        raise UsageStateError(f'Cannot save usage ledger {path}; generation stopped to avoid unrecorded retries.') from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 class AIService:
     OPENAI_BIG_MODELS = {"gpt-5.4"}
+
+    def set_reasoning_effort(self, writing=None, review=None) -> bool:
+        """Configure work/review requests without wrapping the underlying client."""
+        self.reasoning_effort = writing
+        self.review_reasoning_effort = writing if review is None else review
+        return self.provider in ('openai', 'openai-oauth', 'openrouter', 'hyper', 'grok', 'http')
+
+    def _reasoning_options(self, role, responses=False):
+        effort = self.reasoning_effort if role == 'writing' else self.review_reasoning_effort
+        if not effort or effort == 'provider-default':
+            return {}
+        if self.provider not in ('openai', 'openai-oauth', 'openrouter', 'hyper', 'grok', 'http'):
+            return {}
+        field = {'reasoning': {'effort': effort}}
+        if responses:
+            return field
+        if self.provider == 'openai':
+            field = {'reasoning_effort': effort}
+        return {'extra_body': field}
 
     def __init__(
         self,
         config_path: Optional[str] = None,
         usage_state_path: Optional[str] = None,
+        *,
+        allow_auth_prompt: bool = True,
+        client_max_retries: Optional[int] = None,
     ):
         """
         Initialize AIService.
@@ -214,6 +383,10 @@ class AIService:
             "timeout": 60
         }
         """
+        self.allow_auth_prompt = allow_auth_prompt
+        self.client_max_retries = client_max_retries
+        self.reasoning_effort = None
+        self.review_reasoning_effort = None
         self.config = self._load_config(config_path or os.getenv("AI_CONFIG_PATH", DEFAULT_CONFIG_PATH))
         if not self.config:
             raise ValueError("AIService configuration could not be loaded")
@@ -288,12 +461,16 @@ class AIService:
             # Claude Code runs on the user's own subscription through the CLI;
             # there is no key to resolve and no key to leak.
             return "claude-code-cli"
+        if self.provider == "commandcode":
+            # Same deal as claude: the CLI carries the user's own plan auth.
+            return "commandcode-cli"
         env_key_map = {
             "openai": "OPENAI_API_KEY",
             "groq": "GROQ_API_KEY",
             "google": "GOOGLE_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
             "hyper": "HYPER_API_KEY",
+            "grok": "XAI_API_KEY",
         }
         provider_env = str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
         candidates = [
@@ -305,6 +482,7 @@ class AIService:
             os.getenv("MINIMAX_API_KEY", ""),
             os.getenv("OPENROUTER_API_KEY", ""),
             os.getenv("HYPER_API_KEY", ""),
+            os.getenv("XAI_API_KEY", ""),
             self.config.get("api_key", ""),
         ]
         # ponytail: when targeting an opencode tier, prefer opencode's live auth.json
@@ -324,6 +502,7 @@ class AIService:
             "minimax": "MINIMAX_API_KEY",
             "openrouter": "OPENROUTER_API_KEY",
             "hyper": "HYPER_API_KEY",
+            "grok": "XAI_API_KEY",
         }
         return str(self.config.get("api_key_env") or env_key_map.get(self.provider, "AI_API_KEY"))
 
@@ -332,6 +511,8 @@ class AIService:
         Returns True if a new key was provided and the session was re-init'd (caller should retry).
         Returns False if the user declined to enter a key (caller should raise).
         """
+        if not self.allow_auth_prompt:
+            return False
         api_key_env = self._api_key_env_name()
         print(f"\n[!] {self.provider_label} API request returned 401 Unauthorized.")
         print(f"    Your {api_key_env} is missing or invalid.")
@@ -371,7 +552,7 @@ class AIService:
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
     def _resolve_base_url(self) -> str:
-        if self.provider == "claude":
+        if self.provider in ("claude", "commandcode"):
             return ""          # the CLI needs no endpoint
         default_base_urls = {
             "openai": "https://api.openai.com/v1",
@@ -379,33 +560,21 @@ class AIService:
             "groq": "https://api.groq.com/openai/v1",
             "openrouter": "https://openrouter.ai/api/v1",
             "hyper": "https://hyper.charm.land/v1",
+            "grok": "https://api.x.ai/v1",
         }
         raw_base_url = os.getenv("AI_BASE_URL", self.config.get("base_url", default_base_urls.get(self.provider, "https://api.openai.com/v1")))
         base_url = raw_base_url.rstrip("/")
 
-        if self.provider in ("openai", "openai-oauth", "groq", "http", "openrouter", "hyper") and not base_url.endswith("/v1"):
+        if self.provider in ("openai", "openai-oauth", "groq", "http", "openrouter", "hyper", "grok") and not base_url.endswith("/v1"):
             base_url = f"{base_url}/v1"
 
         return base_url
 
-    def _load_usage_state(self) -> Dict[str, Any]:
-        state = self._default_usage_state()
-        if not self.usage_state_path:
-            return state
-
-        if os.path.exists(self.usage_state_path):
-            try:
-                with open(self.usage_state_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    state.update({k: v for k, v in loaded.items() if k != "buckets"})
-                    if isinstance(loaded.get("buckets"), dict):
-                        state["buckets"].update(loaded["buckets"])
-            except Exception as e:
-                print(f"Warning: Could not load usage state '{self.usage_state_path}': {e}. Starting fresh.")
-
+    def _load_usage_state(self):
+        state = read_ledger(self.usage_state_path, self._default_usage_state())
         self._reset_usage_state_if_needed(state)
         return state
+
 
     def _default_usage_state(self) -> Dict[str, Any]:
         return {
@@ -440,24 +609,11 @@ class AIService:
             "models": {},
         }
 
-    def _load_groq_rate_state(self) -> Dict[str, Any]:
-        state = self._default_groq_rate_state()
-        if not self.groq_rate_state_path:
-            return state
-
-        if os.path.exists(self.groq_rate_state_path):
-            try:
-                with open(self.groq_rate_state_path, "r", encoding="utf-8") as f:
-                    loaded = json.load(f)
-                if isinstance(loaded, dict):
-                    state.update({k: v for k, v in loaded.items() if k != "models"})
-                    if isinstance(loaded.get("models"), dict):
-                        state["models"].update(loaded["models"])
-            except Exception as e:
-                print(f"Warning: Could not load Groq rate state '{self.groq_rate_state_path}': {e}. Starting fresh.")
-
+    def _load_groq_rate_state(self):
+        state = read_ledger(self.groq_rate_state_path, self._default_groq_rate_state())
         self._reset_groq_rate_state_if_needed(state)
         return state
+
 
     def _reset_usage_state_if_needed(self, state: Dict[str, Any]) -> None:
         today = datetime.now().date().isoformat()
@@ -466,7 +622,6 @@ class AIService:
             state.update(self._default_usage_state())
             self._budget_pause_requested = False
             self._budget_pause_reason = ""
-            self._save_usage_state(state)
 
     def _reset_groq_rate_state_if_needed(self, state: Dict[str, Any]) -> None:
         now = datetime.now()
@@ -478,38 +633,20 @@ class AIService:
             state.update(self._default_groq_rate_state())
             self._budget_pause_requested = False
             self._budget_pause_reason = ""
-            self._save_groq_rate_state(state)
             return
 
         if state.get("minute_window_start") != current_minute:
             state["minute_window_start"] = current_minute
             state["minute_tokens"] = 0
             state["minute_requests"] = 0
-            self._save_groq_rate_state(state)
 
-    def _save_usage_state(self, state: Optional[Dict[str, Any]] = None) -> None:
-        if not self.usage_state_path:
-            return
+    def _save_usage_state(self, state=None):
+        save_ledger(self.usage_state_path, self._usage_state if state is None else state)
 
-        payload = state or self._usage_state
-        try:
-            os.makedirs(os.path.dirname(self.usage_state_path), exist_ok=True)
-            with open(self.usage_state_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Warning: Could not save usage state '{self.usage_state_path}': {e}")
 
-    def _save_groq_rate_state(self, state: Optional[Dict[str, Any]] = None) -> None:
-        if not self.groq_rate_state_path:
-            return
+    def _save_groq_rate_state(self, state=None):
+        save_ledger(self.groq_rate_state_path, self._groq_rate_state if state is None else state)
 
-        payload = state or self._groq_rate_state
-        try:
-            os.makedirs(os.path.dirname(self.groq_rate_state_path), exist_ok=True)
-            with open(self.groq_rate_state_path, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-        except Exception as e:
-            print(f"Warning: Could not save Groq rate state '{self.groq_rate_state_path}': {e}")
 
     def _bucket_for_model(self, model_name: str) -> str:
         normalized = model_name.lower()
@@ -713,6 +850,7 @@ class AIService:
             "estimated": int(usage is None),
         }
 
+    @accounted
     def _record_openai_usage(self, model_name: str, usage: Dict[str, int]) -> Dict[str, Any]:
         self._reset_usage_state_if_needed(self._usage_state)
         bucket = self._bucket_for_model(model_name)
@@ -754,6 +892,7 @@ class AIService:
             "exceeded": exceeded,
         }
 
+    @accounted
     def _record_groq_usage(self, model_name: str, usage: Dict[str, int]) -> Dict[str, Any]:
         self._reset_groq_rate_state_if_needed(self._groq_rate_state)
         tpm_limit = self._groq_limit_value("tpm")
@@ -876,6 +1015,7 @@ class AIService:
 
         return ""
 
+    @accounted
     def get_budget_status(self) -> Dict[str, Any]:
         if self.provider == "groq":
             self._reset_groq_rate_state_if_needed(self._groq_rate_state)
@@ -892,9 +1032,15 @@ class AIService:
             print(f"Using the Claude Code CLI ({claude_executable()}) on your subscription")
             return
 
-        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider == "commandcode":
+            print(f"Using the Command Code CLI ({commandcode_executable()}) on your subscription")
+            return
+
+        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper", "grok") and self.use_openai_client and _HAS_OPENAI_CLIENT:
             try:
                 kwargs = {"api_key": self.api_key, "base_url": self.base_url}
+                if self.client_max_retries is not None:
+                    kwargs["max_retries"] = self.client_max_retries
                 if self.provider == "openrouter":
                     headers = self.config.get("headers")
                     if isinstance(headers, dict):
@@ -935,6 +1081,16 @@ class AIService:
         Handles OpenAI client responses, chat completions, Gemini, and HTTP/JSON responses.
         For MiniMax Anthropic API: strips <thinking>...</thinking> blocks from output.
         """
+        def field(value, key, default=None):
+            return value.get(key, default) if isinstance(value, dict) else getattr(value, key, default)
+
+        reasons = [field(resp, "status"), field(resp, "stop_reason")]
+        for item in (field(resp, "choices", []) or []) + (field(resp, "candidates", []) or []):
+            reason = field(item, "finish_reason")
+            reasons.append(getattr(reason, "name", reason))
+        if any(str(reason).lower() in {"length", "max_tokens", "incomplete", "failed", "cancelled",
+                                       "content_filter", "safety", "recitation"} for reason in reasons):
+            raise IncompleteGenerationError("Provider returned incomplete or blocked text; original retained")
         texts: List[str] = []
 
         # OpenAI Python client convenience property (if present)
@@ -1079,6 +1235,7 @@ class AIService:
         }
         return max(256, defaults.get(model_type, int(self.config.get("default_completion_tokens", 2048))))
 
+    @accounted
     def generate_content(
         self,
         prompt: str,
@@ -1122,6 +1279,12 @@ class AIService:
                     if text.strip():
                         return text
                     print(f"[claude] returned empty content on attempt {attempt + 1}")
+
+                elif self.provider == "commandcode":
+                    text = commandcode_chat(model_to_use, request_prompt, timeout=self.timeout)
+                    if text.strip():
+                        return text
+                    print(f"[commandcode] returned empty content on attempt {attempt + 1}")
 
                 elif self.provider == "google" and self.client is not None:
                     # Gemini API
@@ -1177,6 +1340,8 @@ class AIService:
                         }
                         if self.provider == "openai":
                             client_kwargs["service_tier"] = "flex"
+                        client_kwargs["max_output_tokens"] = completion_tokens
+                        client_kwargs.update(self._reasoning_options(model_type, responses=True))
                         resp = self.client.responses.create(**client_kwargs)
                     except Exception as e:
                         last_error = e
@@ -1222,17 +1387,19 @@ class AIService:
                         return text
                     print(f"[groq_client] returned empty content on attempt {attempt + 1}")
 
-                elif self.client is not None and self.provider in ("openai-oauth", "openrouter", "hyper"):
+                elif self.client is not None and self.provider in ("openai-oauth", "openrouter", "hyper", "grok"):
                     try:
                         # hyper.charm.land is OpenAI-compatible on the older
                         # `max_tokens` spelling only; the newer name is a 400.
-                        token_arg = ("max_tokens" if self.provider == "hyper"
+                        # xAI's API takes the older spelling too.
+                        token_arg = ("max_tokens" if self.provider in ("hyper", "grok")
                                      else "max_completion_tokens")
                         resp = self.client.chat.completions.create(
                             model=model_to_use,
                             messages=[{"role": "user", "content": request_prompt}],
                             timeout=self.timeout,
                             **{token_arg: completion_tokens},
+                            **self._reasoning_options(model_type),
                         )
                     except Exception as e:
                         last_error = e
@@ -1264,13 +1431,19 @@ class AIService:
                     elif self.provider == "groq":
                         payload = {"model": model_to_use, "input": request_prompt}
                         url = self.base_url.rstrip("/") + "/responses"
-                    elif self.provider in ("openai-oauth", "openrouter", "hyper"):
+                    elif self.provider in ("openai-oauth", "openrouter", "hyper", "grok"):
                         payload = {
                             "model": model_to_use,
                             "messages": [{"role": "user", "content": request_prompt}],
                             "max_tokens": completion_tokens,
                         }
                         url = self.base_url.rstrip("/") + "/chat/completions"
+                    else:
+                        url = self.base_url.rstrip("/") + "/responses"
+                        payload = {"model": model_to_use, "input": request_prompt,
+                                   "max_output_tokens": completion_tokens}
+                    options = self._reasoning_options(model_type, responses=url.endswith('/responses'))
+                    payload.update(options.get('extra_body', options))
                     try:
                         r = self.session.post(url, json=payload, timeout=self.timeout)
                     except requests.exceptions.RequestException as e:
@@ -1336,11 +1509,13 @@ class AIService:
                             print(f"[http] HTTP error {r.status_code}: {r.text}")
                             r.raise_for_status()
 
-            except (DailyTokenBudgetExceeded, UsageLimitExceeded):
+            except (DailyTokenBudgetExceeded, UsageLimitExceeded, IncompleteGenerationError, UsageStateError):
                 raise
             except Exception as e:
                 error_text = str(e).lower()
                 request_too_large = "request_too_large" in error_text or "request entity too large" in error_text
+                if request_too_large:
+                    raise ValueError("Prompt exceeds provider limits; refusing to silently remove manuscript context") from e
                 if self.provider == "groq":
                     groq_rate_limit = self._parse_groq_rate_limit_error(str(e))
                     if groq_rate_limit:
@@ -1370,18 +1545,6 @@ class AIService:
                             time.sleep(int(retry_after))
                             attempt += 1
                             continue
-                if request_too_large and attempt < max_retries - 1:
-                    print(
-                        f"[{self.provider_label}] Request too large on attempt {attempt + 1}; "
-                        "shrinking prompt and retrying."
-                    )
-                    request_prompt = self._shrink_prompt_text(request_prompt, shrink_factor=0.7)
-                    self._budget_pause_requested = False
-                    attempt += 1
-                    delay = retry_delays[min(attempt - 1, len(retry_delays) - 1)]
-                    print(f"Waiting {delay} seconds before retry...")
-                    time.sleep(delay)
-                    continue
                 last_error = e
                 print(f"[{self.provider_label}] Error on attempt {attempt + 1}: {e}")
 

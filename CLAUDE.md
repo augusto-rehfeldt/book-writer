@@ -10,10 +10,9 @@ AI book generation pipeline: idea → structure → chapters → review → EPUB
   gates on is a percentile of real published fiction in
   `ai_book_creator/config/prose_baseline.json`. Change a number there only by
   re-running `benchmarks/build_prose_baseline.py`, never by taste.
-- **Judges must be another family.** `judge_models` may not share a family with
-  the writing or review model: a text graded by the model that wrote it measures
-  nothing. The `claude` provider serves only its own catalogue, so a Claude-only
-  run has no judges at all and falls back to stylometry.
+- Prefer a comparison model from another family where the endpoint supports it.
+  Otherwise use the review model. LLM preferences require reader calibration;
+  they are not proof of authorship or literary quality.
 
 ## Commands
 - Run: `python main.py`
@@ -34,103 +33,70 @@ and remembers it in `book_output/provider_state.json`.
   line at 32k characters and a chapter prompt blows past it. Its catalogue
   carries `max_output: 0` because the CLI takes no completion cap, and the CLI
   branch in `run()` unsets `AI_*_COMPLETION_TOKENS` when it sees a 0.
+- `commandcode` — same CLI pattern as `claude` but through the Command Code CLI
+  in headless mode (`cmdc -p --output-format text --model ID`, prompt on stdin).
+  `cmd` is deliberately avoided: on Windows that is the system shell. Runs on
+  the user's Command Code subscription, no key; catalogue model ids must be
+  written lowercase (the model menu lowercases picks, and Command Code ids are
+  case-sensitive).
 - `hyper` — hyper.charm.land, OpenAI-compatible (`HYPER_API_KEY`). Send it
   `max_tokens`, not `max_completion_tokens`; the newer spelling is a 400.
+- `grok` — xAI's own API, OpenAI-compatible (`XAI_API_KEY`, `api.x.ai/v1`).
+  Takes the older `max_tokens` spelling like hyper. Its `judge_models` are
+  grok models because that is all the endpoint serves — same-family judges,
+  so treat their humanness verdicts as weak signal there.
 - `generate_content(..., model=...)` overrides the role default. That parameter
   exists for the judges and nothing else.
 
-## Humanness (measured 2026-08-22 — do not re-derive)
-Reference corpus: 48 English novels from the user's Calibre library, converted
-with Calibre's own `ebook-convert`. Two tables, both in `prose_baseline.json`:
-`ranges` (4,036 windows of 1,200 words) and `chapter_ranges` (577 whole
-chapters). **A text is scored against the table for its own size** —
-`scale_ranges()` switches at 1,500 words. A chapter of unbroken dialogue and a
-chapter with none are both ordinary; no 1,200-word window looks like either, so
-window percentiles used on a chapter fail prose that is perfectly human.
+## Editorial pipeline
 
-| | published chapters | this pipeline's chapters |
-|---|---|---|
-| `local_score` | median 1.5, p90 19, max 52 | median 25.5 (12–42) |
-| `ly_per_1k` | 9.1 – 24.2 (median 14.9) | 1.7 – 6.4 |
-| `short_sent_ratio` | 0.17 – 0.55 | 0.58 – 0.74 |
-| `sent_len_mean` | 8.6 – 16.6 (median 11.5) | 6.4 – 8.9 |
-| `semicolon_per_1k` | median 0.65 | ~0.0 |
+- Approved names remain fixed. Never rename characters after generating the layout.
+- Step 0 requests a voice brief; Step 1 plans scene purpose and scales those
+  scene-based length estimates to the total. Do not restore randomized tempo,
+  shuffled chapter budgets, or automatic page-count padding.
+- Step 2 supplies the approved layout, glossary, rolling continuity record, and
+  the preceding ending. Continuity extraction reads every passage and records
+  character knowledge, chronology, motivation and unresolved threads.
+- `utils/editorial.py` applies exact nonoverlapping edits. All unselected prose
+  remains intact. Headings, scene breaks and length bounds are checked locally;
+  semantic preservation and editorial preference are checked in both A/B orders.
+- Style statistics only trigger passage inspection. They never decide which
+  version is better. Do not add adverb/dialogue quotas or authorship probabilities.
+- Step 3 reads every chapter and the full manuscript in consecutive passages.
+  It makes one bounded correction pass on quoted findings and rechecks the
+  changed manuscript. Unresolved issues remain in the analysis report.
+- First drafts and prior versions are retained. Use `save_text` for manuscript
+  updates; it backs up the current version and replaces the live file atomically.
+- Persist source hashes and continuity context hashes so edited chapters and
+  interrupted runs cannot silently reuse stale review results.
+- Provider truncation is an error. Never silently trim the end of manuscript
+  context to retry an oversized prompt.
 
-- **The scrubbed-adverb register is the loudest tell.** A model applying "cut
-  the adverbs" at full strength lands at 4 per 1,000 words; real novelists write
-  ~14. It is the one metric where the two populations do not overlap at all,
-  which is why `CHECKS` weights it hardest.
-- Second loudest: relentless staccato. Drafts run a 7-word average sentence and
-  60-74% of sentences under 8 words; novels sit near 11.5 and 40%.
-- Do **not** penalise semicolons or long sentences — published fiction uses
-  both and the drafts already avoid them.
-- `ttr` is mean segmental TTR (`_msttr`), not plain TTR: plain TTR falls with
-  length, so a 3,000-word chapter would always lose to a 1,200-word reference
-  window no matter who wrote it.
-- Threshold 15 flags 14% of *published* chapters and 92% of drafts. That trade
-  is deliberate and the reason a rewrite must never be able to make things
-  worse: `humanize()` returns the best version it saw.
-- **Checks that fire on real prose as often as on drafts were removed or
-  repriced.** A twice-repeated 6-gram appears in 59% of published chapters
-  (77% of drafts) and was costing 16 points, so `local_score` calls
-  `repeated_phrases(times=3)`. 36% of published chapters carry at least one
-  `LLM_TELLS` phrase, so tells are priced by `tell_chapter_rate`: 1.5 points if
-  more than 1% of real chapters use it, 5 if they never do.
-- `benchmarks/corpus/` caches extracted book text so a rebuild costs no
-  conversions. `is_fiction()` needs a 0.15 dialogue floor: military histories
-  quote documents often enough to clear anything lower, and two of them in the
-  sample drag the sentence-length percentiles toward essay prose.
+## Evaluation and reference corpus
 
-### Variation, not compliance
-One target for every chapter is itself the tell. Published books vary chapter to
-chapter with a coefficient of variation of 0.13–0.19 on rhythm; this pipeline
-managed 0.08 (`within_book_cv` in the baseline).
+The shipped `prose_baseline.json` retains the legacy measured ranges. Its score
+describes style outliers in that corpus, not human authorship or writing quality.
+Rebuild only from real corpus data, never by changing thresholds to fit a draft.
 
-- `humanizer.chapter_lane(seed)` draws a pace and a dialogue level per chapter
-  from `chapter_ranges` and states them **as prose, not as a quota**, clamped to
-  p05–p95 so a lane can never aim at something the scorer would then fail.
-  `step_2._chapter_register()` seeds it with `zlib.crc32` of number + title, not
-  `hash()`, which is salted per process and would re-roll on resume.
-- `_rewrite` sends **only the quotas for the checks that actually failed**
-  (`local_score()["failed"]` → `QUOTAS`). The old prompt asked every passage for
-  more short sentences *and* penalised staccato in the same breath; a passage
-  now gets torn up only for the problem it has.
-- `humanizer.book_report()` checks the whole book's chapter-to-chapter spread
-  against `within_book_cv` and only reports (step 3 prints it and writes it into
-  `book_analysis.txt`). Every chapter can be inside the human range and the book
-  still read as machine-written.
-- Measured end to end on chapter_02 through the Claude CLI: 41.7 → 12.0 in one
-  round, `ly_per_1k` 4.1 → 14.7, `sent_len_mean` 6.4 → 8.9, length 2,508 →
-  2,588 words.
+Future rebuilds select fiction using Calibre tags, reserve books by title hash
+for evaluation, and regenerate chapter and window tables together. Correct the
+library metadata first. Chapter measurements use only the selected calibration
+titles, not every cached book.
 
-## Chapter length (measured 2026-08-22 — do not re-derive)
-591 chapters from 22 corpus novels, split on their own headings
-(`benchmarks/measure_chapter_shape.py`, cached in `prose_baseline.json` under
-`chapter_shape`). Ratio of a chapter to its book's median:
+`benchmarks/evaluate_prose.py` produces a blind reading pack and summarizes
+human preferences separately from content loss. The fixed synthetic examples in
+`benchmarks/prose_cases.json` exercise the workflow; actual quality claims require
+reader comparisons on generated manuscripts.
 
-| p02 | p05 | p25 | p50 | p75 | p95 | p98 |
-|---|---|---|---|---|---|---|
-| 0.27 | 0.40 | 0.81 | 1.00 | 1.18 | 1.84 | 2.22 |
+Run `python -B -m unittest discover -s tests -q` and
+`python -B -m unittest test_publish_pipeline -q`. The editorial tests and
+benchmark sources are explicitly included in Git; corpus text and other local
+tests remain ignored.
 
-- 8% of published chapters are under half their book's median, and the median
-  book's shortest chapter is 0.34x. A pipeline that asks every chapter for
-  target±10% is the tell.
-- `step_1_structure.chapter_budget()` samples that quantile curve once per
-  equal-probability stratum, then shuffles: even a 12-chapter book gets both
-  tails. Seeded on the book idea, so a resumed run rebuilds the same budgets.
-- **The budget overrides whatever the model wrote.** The prompt hands the model
-  the list so chapter *scope* matches the length, but `execute()` reassigns
-  `word_count_estimate` by index — models copy a 28-number list badly, and the
-  sum is what keeps the book on its page target.
-- Nothing downstream may floor a chapter back to the book average: step 2 asks
-  for `word_count_estimate` ±15%, and step 3 expands whichever chapter is
-  furthest under *its own* budget, not the shortest one on disk.
+## Shared service contract
 
-## Gotchas
-- `humanize()` returns the **best** version it saw, never merely the last, and
-  `_rewrite` keeps the original block whenever a rewrite comes back under 80% of
-  its length — a short rewrite has dropped events, not adjectives, and chapters
-  are length-budgeted.
-- The humanness pass is skipped entirely when `prose_baseline.json` is missing
-  or `AI_BOOK_HUMANIZE=0`.
-- `tests/` and `benchmarks/` are in `.gitignore` — they exist on disk only.
+Music writer and mathforge are supported consumers. Expose options on AIService,
+not private-method or SDK monkeypatches. `allow_auth_prompt`, `client_max_retries`
+and `set_reasoning_effort(writing, review)` are public. Metered requests sharing a
+ledger serialize under an OS lock; atomic writes and UsageStateError prevent silent
+accounting resets/retries. Run the workspace checks for all three consumers together.

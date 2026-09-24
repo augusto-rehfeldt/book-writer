@@ -1,22 +1,6 @@
-"""Humanness scoring and rewriting for English novel prose.
+"""Descriptive style diagnostics for English fiction, with verified local edits.
 
-Three layers, because no single signal is trustworthy:
-
-  1. ``local_score`` — stylometry against ranges measured on real published
-     novels (``config/prose_baseline.json``, built by
-     ``benchmarks/build_prose_baseline.py`` from the user's Calibre library).
-     Most public AI detectors are perplexity/burstiness classifiers underneath,
-     so matching the rhythm real novelists actually write in is the highest
-     leverage fix available.
-  2. ``llm_judges`` — models asked to bet on whether a human wrote the page. A
-     model rarely flags its own output, so a judge from another family is worth
-     far more than asking the writer to grade itself.
-  3. ``humanize`` — a rewrite-then-rescore loop, block by block with counted
-     quotas. A whole-chapter rewrite regresses to the model's default register.
-
-Run it standalone on any text to get a number:
-
-    python -m ai_book_creator.utils.humanizer book_output/chapter_01.txt
+The score measures distance from a reference corpus, not authorship or literary quality.
 """
 
 from __future__ import annotations
@@ -24,11 +8,13 @@ from __future__ import annotations
 import collections
 import json
 import os
-import random
 import re
 import statistics
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+from .editorial import edit_text
+from .text_utils import parse_json as _parse_json
 
 BASELINE_PATH = Path(__file__).resolve().parent.parent / "config" / "prose_baseline.json"
 
@@ -311,76 +297,8 @@ def scale_ranges(ref: Dict[str, Any], words: int) -> Dict[str, Any]:
     return ref.get("ranges") or {}
 
 
-def quantile(ranges: Dict[str, Any], metric: str, u: float, fallback: float) -> float:
-    """Value of ``metric`` at quantile ``u``, interpolated between percentiles."""
-    entry = ranges.get(metric) or {}
-    points = sorted((int(k[1:]) / 100, float(v)) for k, v in entry.items() if k.startswith("p"))
-    if not points:
-        return fallback
-    if u <= points[0][0]:
-        return points[0][1]
-    for (q0, v0), (q1, v1) in zip(points, points[1:]):
-        if u <= q1:
-            return v0 + (v1 - v0) * (u - q0) / (q1 - q0)
-    return points[-1][1]
-
-
-def chapter_lane(seed: int, ref: Optional[Dict[str, Any]] = None) -> str:
-    """A per-chapter register drawn from the corpus, as prose rather than quotas.
-
-    One target for every chapter is its own tell: real books vary chapter to
-    chapter by a coefficient of variation of 0.13-0.19 on rhythm, this pipeline
-    by 0.08. Handing each chapter a different lane out of the measured
-    distribution buys that variance back without narrowing what any one chapter
-    is allowed to do — the lane always sits inside the range the scorer accepts.
-
-    Pace and dialogue are drawn separately: a chase is clipped whether or not
-    anyone is talking.
-    """
-    ref = baseline() if ref is None else ref
-    ranges = ref.get("chapter_ranges") or ref.get("ranges") or {}
-    rng = random.Random(seed)
-    # Clamped to p05..p95: the lane must never aim at a target the scorer would
-    # then mark as a failure. The scorer's own bounds are those percentiles.
-    pace, talk = 0.05 + rng.random() * 0.9, 0.05 + rng.random() * 0.9
-    # Fast chapters are short-sentenced: one draw, read from both ends.
-    sent_len = quantile(ranges, "sent_len_mean", 1.0 - pace, 11.5)
-    short = quantile(ranges, "short_sent_ratio", pace, 0.40)
-    dialogue = quantile(ranges, "dialogue_ratio", talk, 0.64)
-    if pace > 0.66:
-        pace_note = ("fast and clipped: short sentences carry it, and the long ones are "
-                     "rare and deliberate")
-    elif pace < 0.33:
-        pace_note = ("slow and dense: long periods with subordinate clauses, room for "
-                     "interiority, short sentences used as punctuation")
-    else:
-        pace_note = "middling: the sentence lengths move around without a settled habit"
-    if dialogue > 0.7:
-        talk_note = "carried almost entirely by people talking"
-    elif dialogue < 0.3:
-        talk_note = "almost all narration and action, with speech used sparingly"
-    else:
-        talk_note = "a normal mix of scene and speech"
-    return (
-        "REGISTER FOR THIS CHAPTER (drawn from the reference corpus; other chapters of "
-        "this book get different ones, and that variation is the point — do not write "
-        "every chapter at the same tempo):\n"
-        f"- Pace: {pace_note}. Around {sent_len:.0f} words per sentence on average, "
-        f"roughly {short:.0%} of them under 8 words.\n"
-        f"- Texture: {talk_note} (about {dialogue:.0%} of paragraphs carry dialogue).\n"
-        "These are the centre of a wide lane, not a quota. Miss them for a good reason "
-        "and the chapter is still right; hit them by counting words and it is not."
-    )
-
-
 def book_report(chapters: List[str], ref: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Whether a finished book varies chapter to chapter the way real books do.
-
-    Every chapter can be inside the human range and the book still read as
-    machine-written, because published novels differ from themselves more than
-    this pipeline differs from itself. Measured medians live in the baseline
-    under ``within_book_cv``.
-    """
+    """Compare chapter-to-chapter variation with the reference corpus."""
     ref = baseline() if ref is None else ref
     real_cv = ref.get("within_book_cv") or {}
     prints = [fingerprint(c) for c in chapters if len(c.split()) >= 800]
@@ -398,19 +316,17 @@ def book_report(chapters: List[str], ref: Optional[Dict[str, Any]] = None) -> Di
         # its own kind of artificial, and this only has to catch flatness.
         if cv < real * 0.6:
             out["uniform"].append(
-                f"{metric}: chapters vary by cv={cv:.2f}, published books vary by "
-                f"{real:.2f}. The chapters are more alike than a real novel's are")
+                f"{metric}: chapter variation cv={cv:.2f}, reference median "
+                f"{real:.2f}. Check whether this uniformity suits the story")
     return out
 
 
 def local_score(text: str, ref: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """0 = reads like a published novel, 100 = reads like a chatbot.
+    """0 = no measured outliers, 100 = capped aggregate style penalty.
 
-    Being *inside* the range real novelists write in costs nothing, which is the
-    only way the number means anything. Measured 2026-08-22 over 48 published
-    novels against this pipeline's own 13 drafts: real prose 0-13 (median 0),
-    drafts 8.5-42.5 (median 18.5). The ranges touch, so 15 is a soft gate and
-    the score is mainly a list of what to fix; judges are the sharper signal.
+    This diagnostic identifies statistical outliers for an editor to inspect.
+    It does not measure causality, character voice, content preservation or
+    reader preference. An outlier can be deliberate and effective prose.
     """
     ref = baseline() if ref is None else ref
     allowed = set(ref.get("corpus_ok") or [])
@@ -463,246 +379,44 @@ def local_score(text: str, ref: Optional[Dict[str, Any]] = None) -> Dict[str, An
             "metrics": fp}
 
 
-JUDGE_PROMPT = """You are a forensic detector of machine-written fiction. Read the passage \
-and estimate the probability (0-100) that a language model wrote it.
+def _rewrite(ai_service, text: str, log=print,
+             context: str = "", threshold: float = 15.0) -> Tuple[str, list]:
+    """Only inspect passages that independently trigger the diagnostic."""
+    def diagnose(passage):
+        local = local_score(passage)
+        return "\n".join(local["issues"]) if local["score"] >= threshold else ""
 
-Weigh: rhythmic uniformity, prefabricated transitions, suspiciously symmetrical paragraphs, \
-generic sensory detail, emotions named instead of shown, every scene closing on a summarising \
-beat, dialogue where nobody interrupts or misunderstands, an absence of idiosyncrasy or risk.
-
-Reply with JSON only:
-{"ai_probability": <0-100>, "verdict": "human"|"ai"|"unsure", \
-"signals": ["...", "..."], "suspect_lines": ["verbatim quote", "..."]}
-
-PASSAGE:
-"""
-
-
-def _parse_json(raw: str) -> Optional[dict]:
-    for candidate in (raw.strip(),
-                      *(m.group(1) for m in re.finditer(r"```(?:json)?\s*(.*?)```", raw, re.S)),
-                      raw[raw.find("{"):raw.rfind("}") + 1] if "{" in raw else ""):
-        if not candidate:
-            continue
-        try:
-            parsed = json.loads(candidate)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            continue
-    return None
-
-
-def llm_judges(ai_service, text: str, models: Optional[List[str]] = None,
-               log=print) -> List[Dict[str, Any]]:
-    """Ask other models to bet on whether a human wrote it.
-
-    ``models`` defaults to ``judge_models`` in the AI config. Leave it empty and
-    the gate runs on stylometry alone: a text judged by the family that wrote it
-    measures nothing, so a judge that is not a stranger is worse than none.
-    """
-    models = models if models is not None else list(ai_service.config.get("judge_models") or [])
-    out: List[Dict[str, Any]] = []
-    for model in models:
-        try:
-            raw = ai_service.generate_content(JUDGE_PROMPT + text[:20000],
-                                              model_type="review", model=model,
-                                              max_completion_tokens=1024)
-        except Exception as exc:  # noqa: BLE001 - a dead judge must not stop the run
-            log(f"  · judge {model} unavailable: {type(exc).__name__}")
-            continue
-        parsed = _parse_json(raw)
-        if not parsed:
-            log(f"  · judge {model} returned no JSON")
-            continue
-        parsed["model"] = model
-        out.append(parsed)
-        log(f"  · judge {model}: {parsed.get('ai_probability')}% AI ({parsed.get('verdict')})")
-    return out
-
-
-REWRITE_PROMPT = """Rewrite this PASSAGE so it reads like a page from a published novel. This \
-is not a polish pass and it is not a general improvement: fix the measured problems below and \
-leave everything else alone.
-
-WHAT THIS PASSAGE (~{words} words) MEASURABLY NEEDS. Nothing else is being asked for:
-{quotas}
-
-WHAT GIVES A MACHINE AWAY, and what to do instead:
-- Every paragraph makes the same move (state a beat, develop it, close it). Break that. Let a \
-paragraph end mid-thought, on a digression, on an unanswered question, on an object.
-- Emotion gets named after it has been shown. Cut the naming sentence. Trust the action.
-- Filter verbs (felt, saw, heard, noticed, realized, seemed) put a narrator between the reader \
-and the scene. Delete most of them and let the thing happen on the page.
-- Dialogue in which everyone is articulate and nobody interrupts. Let people talk past each \
-other, evade, answer a different question, or say nothing.
-- Stock phrases: "a mixture of", "the weight of", "hung in the air", "couldn't help but", \
-"a shiver ran down", "let out a breath she didn't know she was holding", "in that moment". \
-Cut every one you find.
-- Do not close on a summary of what just happened, and never on a broad statement about life.
-
-HARD RULES:
-- Keep every plot event, character action, and piece of dialogue content. You are changing how \
-it reads, not what happens.
-- Keep the length within 10% of the original.
-- No headings, no bullets, no bold, no commentary. Narrative prose only.
-- Keep `***` scene breaks exactly where they already are.
-
-MEASURED PROBLEMS in the full chapter:
-{issues}
-
-=== PASSAGE ===
-{text}
-=== END PASSAGE ===
-
-Return only the rewritten passage."""
-
-
-def _blocks(text: str, batch_words: int = 900) -> List[Tuple[str, str]]:
-    out: List[Tuple[str, str]] = []
-    buf: List[str] = []
-    n = 0
-    for para in text.split("\n\n"):
-        if para.lstrip().startswith("#"):
-            if buf:
-                out.append(("text", "\n\n".join(buf)))
-                buf, n = [], 0
-            out.append(("head", para))
-            continue
-        buf.append(para)
-        n += len(para.split())
-        if n >= batch_words:
-            out.append(("text", "\n\n".join(buf)))
-            buf, n = [], 0
-    if buf:
-        out.append(("text", "\n\n".join(buf)))
-    return out
-
-
-# One quota line per failing metric. A rewrite that hands the model every quota
-# every time flattens the prose it was supposed to save: the passage gets torn
-# up for problems it does not have. Keys are `metric:side` from CHECKS.
-QUOTAS = {
-    "ly_per_1k:low":
-        "- at least {adverbs} -ly adverbs, used where they carry meaning ('quietly', "
-        "'almost', 'finally'). Adverbs were stripped out of this passage and that is "
-        "the loudest machine signature in it",
-    "short_sent_ratio:high":
-        "- stop chopping. At least {long} sentences of MORE than 25 words that keep "
-        "their footing, built with commas, 'and', a semicolon, a subordinate clause",
-    "sent_len_mean:low":
-        "- let the sentences breathe: join clauses that were split for effect, and "
-        "keep at least {long} periods over 25 words",
-    "sent_len_mean:high":
-        "- at least {short} sentences of FEWER than 8 words, landing like a verdict",
-    "burstiness:low":
-        "- put a very short sentence directly next to a very long one, at least "
-        "{short} times. The lengths are too even",
-    "long_sent_ratio:low":
-        "- at least {long} sentence over 35 words that does not lose its footing",
-    "para_cv:low":
-        "- at least {oneline} paragraph of a single line, sitting between two long ones",
-    "dialogue_ratio:low":
-        "- play at least one beat as dialogue instead of summarising it",
-    "opener_top_share:high":
-        "- vary how sentences open; too many start on the same word",
-    "filter_per_1k:high":
-        "- cut the filter verbs (felt, saw, heard, noticed, realized, seemed) and let "
-        "the thing happen on the page",
-    "dash_per_1k:high":
-        "- at most {dashes} em dashes in the whole passage",
-    "ttr:low":
-        "- widen the vocabulary: the same nouns and verbs keep coming back",
-}
-
-
-def _quota_block(failed: List[str], words: int) -> str:
-    """Only the quotas for what actually failed, sized for this block."""
-    approx_sentences = max(1, words // 16)
-    numbers = {
-        "adverbs": max(2, round(words * 0.012)),
-        "short": max(2, round(approx_sentences * 0.2)),
-        "long": max(1, round(approx_sentences * 0.08)),
-        "oneline": 1,
-        "dashes": max(1, words // 700),
-    }
-    lines = [QUOTAS[key].format(**numbers) for key in failed if key in QUOTAS]
-    if not lines:
-        lines = ["- cut the stock phrasing and the repetition listed below; change "
-                 "nothing else"]
-    lines.append("- at least one concrete particular already present in the passage - a "
-                 "name, a number, an object, the weather. Invent nothing new")
-    return "\n".join(lines)
-
-
-def _rewrite(ai_service, text: str, issues: List[str], failed: Optional[List[str]] = None,
-             log=print) -> str:
-    """Rewrite block by block. A whole-chapter pass averages the quotas away."""
-    issue_text = "\n".join(f"- {x}" for x in issues[:20]) or "- rhythm is too even"
-    parts: List[str] = []
-    for kind, block in _blocks(text):
-        if kind == "head":
-            parts.append(block)
-            continue
-        w = len(block.split())
-        prompt = REWRITE_PROMPT.format(
-            words=w,
-            quotas=_quota_block(failed or [], w),
-            issues=issue_text,
-            text=block)
-        try:
-            rewritten = ai_service.generate_content(prompt, model_type="writing").strip()
-            # A rewrite that loses a fifth of the block has dropped events, not
-            # adjectives. Chapters are length-budgeted, so keep the original.
-            if not rewritten or len(rewritten.split()) < w * 0.8:
-                log("  · block rewrite came back short; keeping the original")
-                rewritten = block
-            parts.append(rewritten)
-        except Exception as exc:  # noqa: BLE001 - keep the original block on failure
-            log(f"  · block rewrite failed ({type(exc).__name__}); keeping the original")
-            parts.append(block)
-    return "\n\n".join(parts)
+    return edit_text(
+        ai_service, text,
+        "Check whether the diagnostic hints identify an actual weakness in this passage. "
+        "Fix only supported problems. Preserve deliberate rhythm and the established voice.",
+        context, diagnose=diagnose)
 
 
 def humanize(ai_service, text: str, *, rounds: int = 2, threshold: float = 15.0,
-             use_judges: bool = False, log=print) -> Tuple[str, Dict[str, Any]]:
-    """Rewrite until every available signal reads below ``threshold``.
+             use_judges: bool = False, log=print, context: str = "") -> Tuple[str, Dict[str, Any]]:
+    """Use style metrics as hints; accept edits only after editorial verification.
 
-    Returns the best version seen, never a worse one than it was handed: a
-    rewrite that scores higher than the draft is thrown away.
+    `use_judges` is retained for callers using older configs. Authorship detection
+    no longer controls acceptance. Configured judges verify editorial changes.
     """
+    report: Dict[str, Any] = {"rounds": [], "edits": []}
     if rounds <= 0:
-        return text, {"rounds": [], "passed": None, "final_score": None, "skipped": True}
-    report: Dict[str, Any] = {"rounds": []}
-    best, best_score = text, 1e9
-    for i in range(1, rounds + 1):
+        return text, {**report, "skipped": True, "final_score": None, "passed": None}
+    for index in range(rounds):
         local = local_score(text)
-        judges = llm_judges(ai_service, text, log=log) if use_judges else []
-        probs = [local["score"]] + [float(j.get("ai_probability", 50)) for j in judges]
-        worst = max(probs)
-        report["rounds"].append({"round": i, "local": local["score"],
-                                 "judges": judges, "worst": worst})
-        log(f"[humanness] round {i}: local={local['score']} worst={worst:.1f} "
-            f"(threshold {threshold})")
-        if worst < best_score:
-            best, best_score = text, worst
-        if worst < threshold:
-            report["passed"] = True
-            report["final_score"] = worst
-            return text, report
-        if i == rounds:
+        report["rounds"].append({"round": index + 1, "local": local["score"]})
+        log(f"[style diagnostics] round {index + 1}: {local['score']} (not an authorship score)")
+        if local["score"] < threshold or index == rounds - 1:
             break
-        issues = list(local["issues"])
-        for j in judges:
-            issues += [f"[{j['model']}] {s}" for s in (j.get("signals") or [])[:4]]
-            issues += [f"[{j['model']}] tell: «{f}»"
-                       for f in (j.get("suspect_lines") or [])[:3]]
-        log(f"[humanness] rewriting in blocks ({len(issues)} signals, "
-            f"{len(local['failed'])} quotas)…")
-        text = _rewrite(ai_service, text, issues, local["failed"], log=log)
-    report["passed"] = best_score < threshold
-    report["final_score"] = best_score
-    return best, report
+        revised, edits = _rewrite(ai_service, text, context=context, threshold=threshold, log=log)
+        report["edits"].extend(edits)
+        if revised == text:
+            break
+        text = revised
+    report["final_score"] = local_score(text)["score"]
+    report["passed"] = report["final_score"] < threshold
+    return text, report
 
 
 def enabled() -> bool:
@@ -749,8 +463,8 @@ if __name__ == "__main__":
         for path in args:
             body = Path(path).read_text(encoding="utf-8", errors="replace")
             result = local_score(body)
-            print(f"\n=== {path}: humanness score {result['score']} "
-                  f"(0 = published novel, 100 = chatbot)")
+            print(f"\n=== {path}: style diagnostic score {result['score']} "
+                  f"(style outliers, not authorship probability)")
             for issue in result["issues"]:
                 print(f"  - {issue}")
             print(json.dumps(result["metrics"], indent=2))

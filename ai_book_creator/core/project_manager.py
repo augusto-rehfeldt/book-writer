@@ -6,6 +6,7 @@ import os
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
+from ..utils.text_utils import save_text
 
 
 STEP_SEQUENCE = [
@@ -63,11 +64,12 @@ class ProjectManager:
                 "version": "2.0.0"
             }
             
-            with open(self.project_file, 'w', encoding='utf-8') as f:
-                json.dump(self.book_data, f, indent=4, ensure_ascii=False)
+            save_text(self.project_file, json.dumps(self.book_data, indent=4, ensure_ascii=False),
+                      keep_history=False)
             print(f"💾 Project state saved successfully to {self.project_file}")
         except Exception as e:
             print(f"❌ Error saving project data: {e}")
+            raise
     
     def save_checkpoint(self, checkpoint_name: str, data: Dict[str, Any]):
         """Save a checkpoint for partial progress"""

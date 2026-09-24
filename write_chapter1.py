@@ -94,14 +94,14 @@ def main() -> None:
     # Give the reasoning model headroom: bump writing budget to 8192, planning to >=4096.
     _orig_generate = ai_service.generate_content
 
-    def _generate(prompt, model_type="writing", max_retries=5, max_completion_tokens=None):
+    def _generate(prompt, model_type="writing", max_retries=5, max_completion_tokens=None, model=None):
         if max_completion_tokens is not None:
             if model_type == "writing" and max_completion_tokens < 8192:
                 max_completion_tokens = 8192
             elif model_type != "writing" and max_completion_tokens < 4096:
                 max_completion_tokens = 4096
         return _orig_generate(prompt, model_type=model_type, max_retries=max_retries,
-                              max_completion_tokens=max_completion_tokens)
+                              max_completion_tokens=max_completion_tokens, model=model)
 
     ai_service.generate_content = _generate
 

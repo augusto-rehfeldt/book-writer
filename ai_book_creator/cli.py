@@ -29,10 +29,12 @@ PROVIDER_CONFIG_MAP = {
     "opencode-go": str(PACKAGE_ROOT / "config" / "ai_config_opencode_go.json"),
     "opencode-zen": str(PACKAGE_ROOT / "config" / "ai_config_opencode_zen.json"),
     "claude": str(PACKAGE_ROOT / "config" / "ai_config_claude.json"),
+    "commandcode": str(PACKAGE_ROOT / "config" / "ai_config_commandcode.json"),
     "hyper": str(PACKAGE_ROOT / "config" / "ai_config_hyper.json"),
+    "grok": str(PACKAGE_ROOT / "config" / "ai_config_grok.json"),
 }
 # Providers whose model list lives in their config file and is picked at runtime.
-CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "hyper")
+CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok")
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
@@ -288,7 +290,9 @@ PROVIDER_LABELS = {
     "opencode-go": "OpenCode Go",
     "opencode-zen": "OpenCode Zen free",
     "claude": "Claude Code (your subscription, no API key)",
+    "commandcode": "Command Code (your subscription, no API key)",
     "hyper": "hyper.charm.land",
+    "grok": "xAI Grok",
 }
 
 

@@ -1,0 +1,32 @@
+[
+  {
+    "id": "dialogue",
+    "kind": "dialogue and subtext",
+    "original": "Mara set two cups on the table. 'You're leaving,' she said. 'The train is at six.' He reached for the chipped cup, which had always been his. 'I asked whether you're leaving.'",
+    "candidate": "Mara set two cups on the table. She felt sad because she knew he was leaving. 'You're leaving,' she said sadly. 'The train is at six,' he replied, avoiding her question because it was difficult to answer. He reached for his usual chipped cup."
+  },
+  {
+    "id": "action",
+    "kind": "spatial clarity and event preservation",
+    "original": "The ladder slipped. Jo caught the sill with her left hand; the right still held the envelope. Below her, Arun dragged the ladder back against the wall. She waited until he put his weight on the bottom rung before lowering a foot.",
+    "candidate": "The ladder slipped, but Jo was already through the window. She tucked the envelope into her coat and looked down at Arun, who held the ladder steady."
+  },
+  {
+    "id": "interiority",
+    "kind": "viewpoint and emotional credibility",
+    "original": "He folded the letter into its old creases. His father's handwriting grew smaller at the bottom, as though paper had become expensive again. He could have called the hospital yesterday. The kettle clicked off behind him.",
+    "candidate": "He folded the letter into its old creases, feeling a profound mixture of grief and regret. His father's small handwriting reminded him of their difficult past. He realized that he should have called the hospital yesterday, but now it was too late."
+  },
+  {
+    "id": "transition",
+    "kind": "chronology and character knowledge",
+    "original": "Nell left the key under the cracked flowerpot. She had not told Tomas where it was. By morning, rain had washed the soil across the step. Tomas tried the door twice before walking around to the kitchen window.",
+    "candidate": "Nell left the key under the cracked flowerpot. By morning, rain had washed the soil across the step. Tomas retrieved the key and let himself in through the front door."
+  },
+  {
+    "id": "ending",
+    "kind": "payoff and unnecessary explanation",
+    "original": "On the platform, she opened the parcel. Inside was the blue cup, wrapped in yesterday's weather report. She held it by the handle until the train began to move.",
+    "candidate": "On the platform, she opened the parcel. Inside was the blue cup, wrapped in yesterday's weather report. She held it by the handle until the train began to move. She understood then that even broken relationships could leave behind something worth holding on to."
+  }
+]

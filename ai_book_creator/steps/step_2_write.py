@@ -3,33 +3,27 @@ Step 2: Write Chapters - Generate complete chapter text
 """
 
 import os
-import time
 import json
-import zlib
+from pathlib import Path
 from typing import Dict, Any
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
 from ..utils import humanizer
-from ..utils.text_utils import calculate_word_count, calculate_page_count
+from ..utils.editorial import edit_text, story_context, update_continuity
+from ..utils.text_utils import calculate_word_count, calculate_page_count, save_text, text_digest
 
 
 AUTHORIAL_PROSE_GUIDANCE = """Write from a particular consciousness. Let the viewpoint character notice what this person would notice and miss what this person would miss. Use exact physical details, plain verbs, and character-specific thoughts.
 
-HABITS THAT READ AS MACHINE-WRITTEN. Measured on 577 chapters of published English fiction against this pipeline's own drafts (ai_book_creator/config/prose_baseline.json). These are the differences that showed up; none of them is a quota, and the chapter's own register below outranks all of them:
-- Do not scrub the -ly adverbs. Published novelists write "quietly", "almost", "finally" without apology; prose with every adverb stripped out is the single clearest machine signature in the sample.
-- Do not write the whole chapter in short punches. Staccato is a tool for a moment, not a default setting.
-- Let a sentence run long when the thought is long. Commas, "and", a semicolon, a subordinate clause are all available.
-- Semicolons and colons are allowed in narrative prose. Real novels use them.
-- Vary sentence openings, and vary paragraph size hard: one-line paragraphs next to long ones, not a page of evenly-sized blocks.
-- Play scenes rather than summarising them.
+Let rhythm follow the character's attention and the scene's pressure. Use short or long sentences, adverbs, semicolons and fragments when they serve the thought. Do not manufacture variation or count stylistic features. Play consequential moments as scenes; use summary to cross uneventful time.
 
 Name each thing consistently. Prefer active voice and direct verbs. Avoid nominalizations, stacked auxiliaries, vague phrasal verbs, and editorial adjectives. Keep contractions, idiom, purposeful fragments, and varied cadence when they belong to the narrator or character.
 
-Trust the scene. Do not announce its meaning, inflate its importance, explain an emotion after it has already been shown, or end with a broad statement about life or the future. Cut filter verbs (felt, saw, heard, noticed, realized, seemed) wherever the thing itself can simply happen.
+Trust the scene. Do not inflate its importance or explain an emotion after it has already been shown. Keep perception and uncertainty when they matter to the viewpoint. Let an ending follow the scene's consequence rather than adding an explanation of its meaning.
 
 Let dialogue include interruption, evasion, misunderstanding, private shorthand, and silence where those fit the characters. Nobody should make a speech merely to explain facts everyone present already knows.
 
-Never write these: "a mixture of", "the weight of it", "hung in the air", "couldn't help but", "a shiver ran down", "let out a breath she didn't know she was holding", "in that moment", "something shifted", "the corners of his mouth", "barely above a whisper", "little did", "only time would tell".
+Prefer specific observations over stock phrases. Keep deliberate repetitions, private shorthand and ordinary expressions when they belong to the speaker.
 
 Keep useful rough edges, ambiguity, and odd specificity. Prefer a sentence that belongs to this character and this scene over one that merely sounds polished."""
 
@@ -80,17 +74,6 @@ class WriteStep(BaseStep):
         written_chapters = dict(existing_written_data.get("chapters", {}))
         total_word_count = 0
 
-        for chapter_info in written_chapters.values():
-            filename = chapter_info.get("filename")
-            if filename and os.path.exists(filename):
-                try:
-                    with open(filename, "r", encoding="utf-8") as f:
-                        total_word_count += calculate_word_count(f.read())
-                except Exception:
-                    total_word_count += int(chapter_info.get("word_count", 0))
-            else:
-                total_word_count += int(chapter_info.get("word_count", 0))
-        
         chapter_plots = structure_data.get("chapter_plots", {})
         fallback_min = self.config.get("min_chapter_words", 1000)
         init_page_count = int(init_data.get("page_count", 400))
@@ -99,11 +82,35 @@ class WriteStep(BaseStep):
         chapter_count = len(chapter_plots) or 25
         scaled_min = max(fallback_min, init_target_words // chapter_count)
         
-        for chapter_key, chapter_data in chapter_plots.items():
+        memory, previous_ending = "", ""
+        for chapter_key, chapter_data in sorted(
+                chapter_plots.items(), key=lambda item: item[1]["chapter_number"]):
             existing_chapter = written_chapters.get(chapter_key)
             existing_filename = existing_chapter.get("filename") if existing_chapter else None
             if existing_chapter and existing_filename and os.path.exists(existing_filename):
                 print(f"\nSkipping already cached {chapter_data['title']}...")
+                text = Path(existing_filename).read_text(encoding="utf-8")
+                if not text.strip():
+                    raise BrokenProjectStateError(f"Empty saved chapter: {existing_filename}")
+                context_hash = text_digest(memory)
+                if (existing_chapter.get("source_hash") != text_digest(text)
+                        or existing_chapter.get("context_hash") != context_hash
+                        or not existing_chapter.get("continuity")):
+                    existing_chapter["continuity"] = update_continuity(
+                        self.ai_service, text, memory, chapter_data["title"])
+                    existing_chapter["source_hash"] = text_digest(text)
+                    existing_chapter["context_hash"] = context_hash
+                memory = existing_chapter["continuity"]
+                previous_ending = text[-2500:]
+                existing_chapter["word_count"] = calculate_word_count(text)
+                if self.glossary_manager and existing_chapter.get("glossary_hash") != text_digest(text):
+                    self.glossary_manager.auto_populate_from_chapter(text, chapter_data["title"], self.ai_service)
+                    existing_chapter["glossary_hash"] = text_digest(text)
+                total_word_count += existing_chapter["word_count"]
+                self.save_step_data({"chapters": written_chapters, "total_word_count": total_word_count,
+                                     "total_pages": calculate_page_count(total_word_count, init_words_per_page),
+                                     "_partial": True})
+                self.project_manager.save_project()
                 continue
 
             print(f"\nWriting {chapter_data['title']} (First Draft)...")
@@ -111,17 +118,22 @@ class WriteStep(BaseStep):
             # Step 1 hands every chapter its own budget, uneven on purpose. A short
             # one must not be floored back up to the book average.
             target_words = max(400, int(chapter_data.get("word_count_estimate") or scaled_min))
+            glossary = self.glossary_manager._format_glossary_content() if self.glossary_manager else ""
+            context = story_context(init_data, memory, glossary)
+            context += f"\n\nPREVIOUS CHAPTER ENDING:\n{previous_ending}"
             prompt = self._build_chapter_prompt(
                 chapter_data,
                 target_words,
                 init_data.get("series_layout_content", ""),
+                context,
             )
             
             # Generating First Draft
-            text = self.ai_service.generate_content(
-                prompt,
-                model_type="writing",
-            )
+            chapter_num = chapter_data["chapter_number"]
+            filename = os.path.join(self.output_dir, f"chapter_{chapter_num:02d}.txt")
+            draft_filename = str(Path(filename).with_suffix(".draft.txt"))
+            text = (Path(draft_filename).read_text(encoding="utf-8") if Path(draft_filename).exists()
+                    else self.ai_service.generate_content(prompt, model_type="writing"))
 
             if not text.strip():
                 raise BrokenProjectStateError(
@@ -129,53 +141,55 @@ class WriteStep(BaseStep):
                     "The step will be retried so the missing chapter is not skipped."
                 )
 
-            word_count_initial = calculate_word_count(text)
-            print(f"First draft completed ({word_count_initial} words). Initiating second review/improvement pass...")
-
-            # --- Second Pass AI Edit ---
-            improvement_prompt = self._build_chapter_improvement_prompt(
-                text, chapter_data, target_words
-            )
-
-            improved_text = self.ai_service.generate_content(
-                improvement_prompt,
-                model_type="writing",
-            )
-
-            if improved_text.strip():
-                text = improved_text
-                word_count = calculate_word_count(text)
-                print(f"Second pass completed ({word_count} words).")
-            else:
-                word_count = word_count_initial
-                print("Second pass returned empty. Using first draft instead.")
-            # ---------------------------
+            save_text(draft_filename, text)
+            text, edits = edit_text(
+                self.ai_service, text,
+                "Repair specific weaknesses in motivation, continuity, clarity, subtext or redundant "
+                "explanation. Do not expand solely to meet a word count.",
+                context + "\nCHAPTER OUTLINE:\n" + chapter_data["plot_outline"])
 
             # --- Humanness pass: score against real published novels, rewrite
             # the blocks that read as machine-written. Off when no baseline has
             # been built (benchmarks/build_prose_baseline.py) or AI_BOOK_HUMANIZE=0.
+            human_report = {}
             if humanizer.enabled():
-                text, _ = humanizer.humanize(
+                text, human_report = humanizer.humanize(
                     self.ai_service,
                     text,
                     rounds=int(self.config.get("humanize_rounds", 2)),
                     threshold=float(self.config.get("humanize_threshold", 15.0)),
-                    use_judges=bool(self.config.get("judge_models")),
+                    context=context,
                 )
-                word_count = calculate_word_count(text)
+            word_count = calculate_word_count(text)
             
             # Save final chapter
             chapter_num = chapter_data['chapter_number']
             filename = os.path.join(self.output_dir, f"chapter_{chapter_num:02d}.txt")
             
-            with open(filename, 'w', encoding='utf-8') as f:
-                f.write(text)
+            save_text(filename, text)
+            # Cache the finished prose before any auxiliary model call can fail.
+            written_chapters[chapter_key] = {
+                "title": chapter_data["title"], "chapter_number": chapter_num,
+                "filename": filename, "word_count": word_count,
+                "editorial": edits, "style_diagnostics": human_report,
+            }
+            self.save_step_data({"chapters": written_chapters, "_partial": True,
+                                 "total_word_count": total_word_count + word_count})
+            self.project_manager.save_project()
+            context_hash = text_digest(memory)
+            memory = update_continuity(self.ai_service, text, memory, chapter_data["title"])
+            previous_ending = text[-2500:]
 
             written_chapters[chapter_key] = {
                 "title": chapter_data["title"],
                 "chapter_number": chapter_num,
                 "filename": filename,
-                "word_count": word_count
+                "word_count": word_count,
+                "continuity": memory,
+                "source_hash": text_digest(text),
+                "context_hash": context_hash,
+                "editorial": edits,
+                "style_diagnostics": human_report,
             }
 
             total_word_count += word_count
@@ -184,15 +198,16 @@ class WriteStep(BaseStep):
                 self.glossary_manager.auto_populate_from_chapter(
                     text, chapter_data['title'], self.ai_service
                 )
+                written_chapters[chapter_key]["glossary_hash"] = text_digest(text)
             
             written_data = {
                 "chapters": written_chapters,
                 "total_word_count": total_word_count,
-                "total_pages": calculate_page_count(total_word_count),
+                "total_pages": calculate_page_count(total_word_count, init_words_per_page),
                 "_partial": True,
             }
             self.save_step_data(written_data)
-            time.sleep(2)
+            self.project_manager.save_project()
 
         if not written_chapters:
             recovery = self.project_manager.get_recovery_plan()
@@ -204,7 +219,7 @@ class WriteStep(BaseStep):
                 broken_steps=recovery.get("broken_steps", []),
             )
         
-        total_pages = calculate_page_count(total_word_count)
+        total_pages = calculate_page_count(total_word_count, init_words_per_page)
         
         print(f"\n✅ WRITING COMPLETE!")
         print(f"Chapters: {len(written_chapters)}")
@@ -221,25 +236,12 @@ class WriteStep(BaseStep):
         self.mark_completed()
         return written_data
 
-    def _chapter_register(self, chapter_data: Dict[str, Any]) -> str:
-        """This chapter's own tempo, drawn from the corpus distribution.
-
-        One target for the whole book is itself a tell: published books vary
-        chapter to chapter about twice as much as this pipeline did. Seeded on
-        the chapter number and title so a resumed run rebuilds the same lane.
-        """
-        if not humanizer.enabled():
-            return ""
-        # crc32, not hash(): str hashing is salted per process, so a resumed run
-        # would hand the same chapter a different tempo.
-        key = f"{chapter_data.get('chapter_number')}|{chapter_data.get('title', '')}"
-        return humanizer.chapter_lane(zlib.crc32(key.encode("utf-8", "replace")))
-
     def _build_chapter_prompt(
         self,
         chapter_data: Dict[str, Any],
         target_words: int,
         series_layout: str = "",
+        context: str = "",
     ) -> str:
         opening_style = chapter_data.get("opening_style", "").strip() or "varied"
         series_section = ""
@@ -261,7 +263,7 @@ PLOT OUTLINE: {chapter_data['plot_outline']}
 AUTHORIAL APPROACH:
 {AUTHORIAL_PROSE_GUIDANCE}
 
-{self._chapter_register(chapter_data)}
+{context}
 
 OPENING:
 Honor the opening style tag. Begin with an action, observation, contradiction, or line of speech that could belong only to this chapter. Do not fall back on a generic survey of the room, the air, or the wider world.
@@ -274,24 +276,3 @@ FORM:
 
 Output only the finished chapter."""
 
-    def _build_chapter_improvement_prompt(
-        self,
-        draft_text: str,
-        chapter_data: Dict[str, Any],
-        target_words: int
-    ) -> str:
-        return f"""Revise this chapter in its established authorial voice.
-
-CHAPTER: {chapter_data['title']}
-PLOT OUTLINE: {chapter_data['plot_outline']}
-
-DRAFT TEXT:
-{draft_text}
-
-AUTHORIAL APPROACH:
-{AUTHORIAL_PROSE_GUIDANCE}
-
-Keep strong and distinctive passages intact. Rewrite only what is vague, over-explained, repetitive, out of character, or inconsistent with the plot. Do not add description merely to make the prose richer, and do not smooth every paragraph into the same cadence. Keep every established event and return about {target_words} words ({int(target_words * 0.85)} to {int(target_words * 1.15)}).
-
-Output only the revised chapter, with `# {chapter_data['title']}` at the top and `***` only for genuine scene breaks.
-"""

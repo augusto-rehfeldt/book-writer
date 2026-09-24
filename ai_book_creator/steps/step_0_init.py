@@ -416,7 +416,10 @@ class InitStep(BaseStep):
                 rev_sections.append(("User Feedback", choice))
 
                 rev_prompt = self.ai_service.build_sectioned_prompt(
-                    instruction="Based on the book idea and user feedback, generate 3 NEW distinct plot directions.",
+                    instruction=(
+                        "Based on the book idea and user feedback, generate 4 NEW distinct plot directions. "
+                        "Number them Option 1 through Option 4."
+                    ),
                     sections=rev_sections,
                     max_prompt_tokens=4000,
                     section_token_caps={
@@ -451,7 +454,11 @@ class InitStep(BaseStep):
             "Start with 3 ranked potential titles as a plain numbered list. Titles must use different "
             "syntactic shapes and imagery; avoid generic genre nouns, clichés, subtitles, and near-duplicates. "
             "Then give genre; target audience; 3-5 main themes; setting overview; "
-            "three-act structure; 5-7 main characters with name, role, and brief description.",
+            "three-act structure; 5-7 main characters with fixed names, desires, contradictions, "
+            "relationships, and distinctive speech habits. Include a section headed 'Voice brief' "
+            "specifying viewpoint, tense, narrative distance, vocabulary, humor and a short original "
+            "sample of the intended voice. Choose these to suit this particular book; names remain "
+            "fixed in every subsequent outline and chapter.",
         ))
         
         prompt = self.ai_service.build_sectioned_prompt(

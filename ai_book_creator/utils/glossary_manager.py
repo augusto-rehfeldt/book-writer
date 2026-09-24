@@ -8,6 +8,7 @@ import re
 import random
 from datetime import datetime
 from typing import Dict, List, Any, Optional
+from .text_utils import parse_json, save_text, text_chunks
 
 class GlossaryManager:
     def __init__(self, output_dir: str):
@@ -40,10 +41,11 @@ class GlossaryManager:
     def save_glossary(self):
         """Save the glossary to file"""
         try:
-            with open(self.glossary_file, 'w', encoding='utf-8') as f:
-                json.dump(self.glossary, f, indent=2, ensure_ascii=False)
+            save_text(self.glossary_file, json.dumps(self.glossary, indent=2, ensure_ascii=False),
+                      keep_history=False)
         except Exception as e:
             print(f"Error saving glossary: {e}")
+            raise
     
     # ponytail: three one-line wrappers kept as the call sites read better.
     def add_character(self, name: str, description: str) -> None:
@@ -90,57 +92,39 @@ class GlossaryManager:
         if not ai_service:
             return {"characters": [], "locations": [], "concepts": []}
         
-        extraction_prompt = f"""Extract key elements from this chapter:
-
-CHAPTER: {chapter_title}
-CONTENT: {content[:2000]}...
-
-Extract:
-1. CHARACTERS: Main/supporting characters with brief description
-2. LOCATIONS: Important places with brief description  
-3. CONCEPTS: Key themes, objects, or systems with brief description
-
-Return JSON: {{"characters": [{{"name": "", "description": ""}}], "locations": [...], "concepts": [...]}}
-Only include truly important elements."""
-
-        try:
-            result = ai_service.generate_content(extraction_prompt)
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
-            if json_match:
-                return json.loads(json_match.group())
-            return {"characters": [], "locations": [], "concepts": []}
-        except Exception as e:
-            return {"characters": [], "locations": [], "concepts": []}
+        collected = {"characters": {}, "locations": {}, "concepts": {}}
+        for passage in text_chunks(content):
+            prompt = (
+                "Extract important named characters, locations and concepts from this passage. "
+                "Use the exact names on the page; never rename placeholders or invent identities. "
+                "Return JSON with characters, locations, concepts arrays, each containing objects "
+                "with string name and description. Preserve earlier established facts when updating "
+                "a description; distinguish beliefs and plans from actual events.\n"
+                f"EXISTING GLOSSARY:\n{self._format_glossary_content()}\n"
+                f"EARLIER PASSAGES:\n{json.dumps(collected, ensure_ascii=False)}\n"
+                f"CHAPTER: {chapter_title}\nPASSAGE:\n{passage}"
+            )
+            result = parse_json(ai_service.generate_content(prompt, model_type="review", max_completion_tokens=2048))
+            if not result:
+                raise ValueError("Invalid glossary extraction; previous glossary retained")
+            for category in collected:
+                entries = result.get(category)
+                if not isinstance(entries, list):
+                    raise ValueError(f"Invalid glossary category: {category}")
+                for entry in entries:
+                    if (not isinstance(entry, dict) or not isinstance(entry.get("name"), str)
+                            or not entry["name"].strip() or not isinstance(entry.get("description"), str)):
+                        raise ValueError("Invalid glossary entry")
+                    collected[category][entry["name"]] = entry
+        return {key: list(entries.values()) for key, entries in collected.items()}
     
     def auto_populate_from_chapter(self, chapter_content: str, chapter_title: str, ai_service):
         """Automatically populate glossary from a chapter, using name pools when possible."""
         extracted = self.extract_from_content(chapter_content, chapter_title, ai_service)
 
-        pools = self.get_name_pools()
-        # For characters, try to replace generic names with pool names
-        for char in extracted.get("characters", []):
-            raw_name = char.get("name", "")
-            if raw_name and raw_name not in self.glossary["characters"]:
-                # Check if this name matches any pool category keyword
-                assigned = False
-                for cat, name_list in pools.items():
-                    # If the raw name looks like a placeholder or is very generic, assign a pool name
-                    if raw_name.lower() in ["protagonist", "antagonist", "hero", "villain", "mc"]:
-                        new_name = self.get_random_name(cat)
-                        if new_name:
-                            self.add_character(new_name, char.get("description", ""))
-                            assigned = True
-                            break
-                if not assigned:
-                    self.add_character(raw_name, char.get("description", ""))
-
-        # Locations and concepts can be added normally
-        for loc in extracted.get("locations", []):
-            if loc.get("name") and loc["name"] not in self.glossary["locations"]:
-                self.add_location(loc["name"], loc.get("description", ""))
-        for concept in extracted.get("concepts", []):
-            if concept.get("name") and concept["name"] not in self.glossary["concepts"]:
-                self.add_concept(concept["name"], concept.get("description", ""))
+        for category in ("characters", "locations", "concepts"):
+            for entry in extracted.get(category, []):
+                self._add(category, entry["name"], entry["description"])
 
         self.save_glossary()
 

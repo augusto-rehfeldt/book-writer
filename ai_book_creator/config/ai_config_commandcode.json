@@ -1,0 +1,20 @@
+{
+  "provider": "commandcode",
+  "writing_model": "deepseek/deepseek-v4-pro",
+  "review_model": "claude-sonnet-5",
+  "timeout": 1800,
+  "min_book_pages": 250,
+  "min_chapter_words": 1200,
+  "humanize_rounds": 2,
+  "humanize_threshold": 15.0,
+  "judge_models": [],
+  "models": {
+    "deepseek/deepseek-v4-pro":     { "name": "DeepSeek V4 Pro",     "max_output": 0 },
+    "deepseek/deepseek-v4-flash":   { "name": "DeepSeek V4 Flash",   "max_output": 0 },
+    "zai-org/glm-5.3-flash":        { "name": "GLM-5.3 Flash",       "max_output": 0 },
+    "xiaomi/mimo-v2.5-pro":         { "name": "MiMo V2.5 Pro",       "max_output": 0 },
+    "thinkingmachines/inkling":     { "name": "Inkling",             "max_output": 0 },
+    "claude-sonnet-5":              { "name": "Claude Sonnet 5",     "max_output": 0 },
+    "gpt-5.6-luna":                 { "name": "GPT-5.6 Luna",        "max_output": 0 }
+  }
+}
