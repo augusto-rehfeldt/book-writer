@@ -111,3 +111,11 @@ not private-method or SDK monkeypatches. `allow_auth_prompt`, `client_max_retrie
 and `set_reasoning_effort(writing, review)` are public. Metered requests sharing a
 ledger serialize under an OS lock; atomic writes and UsageStateError prevent silent
 accounting resets/retries. Run the workspace checks for all three consumers together.
+
+`generate_content` never returns a provider's usage-limit notice (`LIMIT_NOTICE_RE`;
+the Claude Code CLI prints "You've hit your session limit" as its reply) and waits
+out errors matching `LIMIT_ERROR_RE`: until the reset the notice names
+(`limit_reset_wait`), else `LIMIT_RETRY` seconds with a 5-hour `LIMIT_PAUSE` every
+`LIMIT_TRIES`th try, indefinitely. The loop sits outside `@accounted` (the body is
+`_generate_content_once`) so a wait never holds the ledger lock. Metered budget
+stops (`UsageLimitExceeded`, `DailyTokenBudgetExceeded`, `UsageStateError`) still raise.

@@ -13,7 +13,7 @@ import threading
 import uuid
 from contextlib import contextmanager
 from functools import wraps
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, List, Tuple
 from urllib.parse import urlparse
@@ -190,6 +190,57 @@ def commandcode_chat(model: str, prompt: str, timeout: int = 1800) -> str:
 
 class IncompleteGenerationError(RuntimeError):
     """A truncated or blocked response must never become a saved manuscript."""
+
+
+# A subscription CLI out of quota answers with a short notice on stdout instead
+# of failing -- Claude Code prints "You've hit your session limit · resets 4pm
+# (America/Argentina/Buenos_Aires)", older builds "Claude AI usage limit
+# reached|1712345678" -- and consumers saved or parsed that notice as content.
+# Replies are matched narrowly (a chapter may say "rate limit"); errors broadly.
+LIMIT_NOTICE_RE = re.compile(r"you'?ve hit your \w+ limit|usage limit reached|limit reached\|\d{10}", re.I)
+LIMIT_ERROR_RE = re.compile(
+    r"hit your \w+ limit|usage limit|limit reached|rate.?limit|too many requests|\b429\b|overloaded_error|\b529\b", re.I
+)
+LIMIT_RETRY = 60  # seconds between retries of a limited call
+LIMIT_TRIES = 5  # limited calls in a row before the long pause
+LIMIT_PAUSE = 5 * 3600  # no reset time given: assume one whole 5-hour window
+_RESET_RE = re.compile(
+    r"resets\s+(?:[A-Z][a-z]{2}\s+\d{1,2},?\s+)?(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*([ap]m)?"
+    r"(?:\s*\(([\w/+-]+)\))?",
+    re.I,
+)
+
+
+def limit_reset_wait(notice: str, now: Optional[datetime] = None) -> Optional[float]:
+    """Seconds until the reset a limit notice names, plus a minute; None if it names none.
+
+    A date in the notice ("resets Sep 25, 4pm") is ignored: waiting only until
+    the next 4pm means the call is limited again and simply waits again.
+    """
+    epoch = re.search(r"\|(\d{10})\b", notice)
+    if epoch:
+        return max(0.0, int(epoch[1]) - time.time()) + 60
+    m = _RESET_RE.search(notice)
+    if not m:
+        return None
+    hour, minute = int(m[1]), int(m[2] or 0)
+    if m[3]:
+        hour = hour % 12 + (12 if m[3].lower() == "pm" else 0)
+    if hour > 23 or minute > 59:
+        return None
+    try:
+        from zoneinfo import ZoneInfo
+
+        zone = ZoneInfo(m[4]) if m[4] else None
+    except Exception:
+        zone = None  # unknown zone name: the CLI prints local time anyway
+    now = now or datetime.now(zone)
+    if zone and now.tzinfo:
+        now = now.astimezone(zone)
+    reset = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if reset <= now:
+        reset += timedelta(days=1)
+    return (reset - now).total_seconds() + 60
 
 
 class UsageLimitExceeded(RuntimeError):
@@ -1244,8 +1295,45 @@ class AIService:
         }
         return max(256, defaults.get(model_type, int(self.config.get("default_completion_tokens", 2048))))
 
-    @accounted
     def generate_content(
+        self,
+        prompt: str,
+        model_type: str = "writing",
+        max_retries: int = 5,
+        max_completion_tokens: Optional[int] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """One completion. A provider usage limit is waited out, never returned.
+
+        Waits until the reset time the notice names; otherwise retries every
+        LIMIT_RETRY seconds with a LIMIT_PAUSE wait every LIMIT_TRIES-th time,
+        indefinitely -- callers keep their progress on disk, so waiting loses
+        nothing. Metered budget stops (UsageLimitExceeded and friends) still
+        raise so the caller's own pause-and-save logic runs. The wait sits
+        outside @accounted so it never holds the shared ledger lock.
+        """
+        limited = 0
+        while True:
+            try:
+                text = self._generate_content_once(prompt, model_type, max_retries, max_completion_tokens, model)
+                if len(text) >= 500 or not LIMIT_NOTICE_RE.search(text):
+                    return text
+                notice = text
+            except (DailyTokenBudgetExceeded, UsageLimitExceeded, UsageStateError):
+                raise
+            except Exception as exc:
+                if not LIMIT_ERROR_RE.search(str(exc)):
+                    raise
+                notice = f"{type(exc).__name__}: {exc}"
+            limited += 1
+            wait = limit_reset_wait(notice) or (LIMIT_PAUSE if limited % LIMIT_TRIES == 0 else LIMIT_RETRY)
+            resume = datetime.fromtimestamp(time.time() + wait).strftime("%H:%M")
+            print(f"[{self.provider_label}] usage limit ({' '.join(notice.split())[:120]}); "
+                  f"try {limited}, waiting until {resume}")
+            time.sleep(wait)
+
+    @accounted
+    def _generate_content_once(
         self,
         prompt: str,
         model_type: str = "writing",

@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -80,6 +81,37 @@ class ServiceContractTests(unittest.TestCase):
             client.client.chat.completions.create.return_value = {'choices': [{'message': {'content': 'answer'}}]}
             client.generate_content('question', model_type='review')
             self.assertEqual(client.client.chat.completions.create.call_args.kwargs['extra_body'], {'reasoning': {'effort': 'low'}})
+
+    def test_usage_limit_is_waited_out_never_returned(self):
+        client = object.__new__(api.AIService)
+        client.provider_label = 'claude'
+        replies = ["You've hit your session limit"] * 4 + [RuntimeError('HTTP 429 Too Many Requests'), 'chapter text']
+
+        def once(*args):
+            reply = replies.pop(0)
+            if isinstance(reply, Exception):
+                raise reply
+            return reply
+
+        client._generate_content_once = once
+        with patch.object(api.time, 'sleep') as sleep:
+            self.assertEqual(client.generate_content('p'), 'chapter text')
+        self.assertEqual([c.args[0] for c in sleep.call_args_list], [api.LIMIT_RETRY] * 4 + [api.LIMIT_PAUSE])
+
+        # prose that merely mentions a limit, other errors and metered budget stops pass through
+        client._generate_content_once = lambda *a: 'She had hit the rate limit of her patience.'
+        self.assertEqual(client.generate_content('p'), 'She had hit the rate limit of her patience.')
+        for error in (ValueError('bad JSON'), api.IncompleteGenerationError('cut')):
+            client._generate_content_once = Mock(side_effect=error)
+            with self.assertRaises(type(error)):
+                client.generate_content('p')
+
+        # a stated reset is waited for directly, in its own zone, rolling over to tomorrow
+        notice = "You've hit your session limit · resets 4pm (America/Argentina/Buenos_Aires)"
+        at = api.datetime(2026, 9, 24, 16, 33, tzinfo=timezone.utc)  # 13:33 in Buenos Aires
+        self.assertEqual(api.limit_reset_wait(notice, at), 2 * 3600 + 27 * 60 + 60)
+        self.assertEqual(api.limit_reset_wait('resets 9:30am', api.datetime(2026, 9, 24, 10, 0)), 23.5 * 3600 + 60)
+        self.assertIsNone(api.limit_reset_wait("You've hit your session limit"))
 
 
 if __name__ == '__main__':
