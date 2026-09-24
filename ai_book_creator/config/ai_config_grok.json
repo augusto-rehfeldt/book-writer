@@ -1,8 +1,8 @@
 {
   "provider": "grok",
   "use_openai_client": true,
-  "writing_model": "grok-4",
-  "review_model": "grok-4-fast",
+  "writing_model": "grok-4.7",
+  "review_model": "grok-4.3",
   "base_url": "https://api.x.ai/v1",
   "api_key_env": "XAI_API_KEY",
   "usage_state_path": "book_output/ai_usage_state.json",
@@ -15,11 +15,26 @@
   "default_completion_tokens": 16384,
   "humanize_rounds": 2,
   "humanize_threshold": 15.0,
-  "judge_models": ["grok-4-fast", "grok-4"],
+  "judge_models": [
+    "grok-4.3",
+    "grok-4.7"
+  ],
   "models": {
-    "grok-4":       { "name": "Grok 4",       "max_output": 32768 },
-    "grok-4-fast":  { "name": "Grok 4 Fast",  "max_output": 32768 },
-    "grok-3":       { "name": "Grok 3",       "max_output": 32768 },
-    "grok-3-mini":  { "name": "Grok 3 Mini",  "max_output": 32768 }
+    "grok-4.7": {
+      "name": "Grok 4.7",
+      "max_output": 32768
+    },
+    "grok-4.6": {
+      "name": "Grok 4.6",
+      "max_output": 32768
+    },
+    "grok-4.5": {
+      "name": "Grok 4.5",
+      "max_output": 32768
+    },
+    "grok-4.3": {
+      "name": "Grok 4.3",
+      "max_output": 30000
+    }
   }
 }

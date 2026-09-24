@@ -8,7 +8,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import time
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from urllib.request import Request, urlopen
 
@@ -41,6 +44,97 @@ PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
 PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
+
+# models.dev publishes each model's context/output limits and list price per 1M
+# tokens; opencode keeps a copy of it on disk. Sources are searched in order.
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
+MODELS_DEV_SOURCES = {
+    "google": ("google",),
+    "openai": ("openai",),
+    "openai-oauth": ("openai",),
+    "groq": ("groq",),
+    "minimax": ("minimax",),
+    "openrouter": ("openrouter",),
+    "opencode-go": ("opencode-go",),
+    "opencode-zen": ("opencode",),
+    "claude": ("anthropic",),
+    # Command Code resells other labs' models; show the maker's price when
+    # models.dev has it, else OpenRouter's.
+    "commandcode": ("anthropic", "openai", "google", "openrouter"),
+    "hyper": ("hyper",),
+    "grok": ("xai",),
+}
+# Paid through a subscription, so the price shown is only the API list rate.
+SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth")
+
+
+@lru_cache(maxsize=None)
+def _models_dev() -> dict:
+    """models.dev catalogue: opencode's copy if under a day old, else live, else stale."""
+    try:
+        if time.time() - MODELS_DEV_CACHE.stat().st_mtime < 86400:
+            return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    try:
+        req = Request(MODELS_DEV_URL, headers={"User-Agent": "ai-book-creator"})
+        with urlopen(req, timeout=10) as resp:
+            return json.load(resp)
+    except Exception:
+        pass
+    try:
+        return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _model_facts(provider: str, mid: str) -> dict:
+    """models.dev entry ({"limit": ..., "cost": ...}) for a model, or {} if unlisted."""
+    mid = mid.lower()
+    tail = mid.rsplit("/", 1)[-1]
+    for source in MODELS_DEV_SOURCES.get(provider, ()):
+        models = (_models_dev().get(source) or {}).get("models") or {}
+        # Claude Code aliases ("opus") follow the newest model of that family.
+        family = [m for m in models.values() if m.get("family") == f"claude-{mid}"]
+        if provider == "claude" and family:
+            return max(family, key=lambda m: m.get("release_date", ""))
+        by_id = {key.lower(): info for key, info in models.items()}
+        by_tail = {key.lower().rsplit("/", 1)[-1]: info for key, info in models.items()}
+        if mid in by_id or tail in by_tail:
+            return by_id.get(mid) or by_tail[tail]
+    return {}
+
+
+def _tokens(n: int) -> str:
+    """1048576 -> '1M', 131072 -> '131K'."""
+    return f"{n / 1e6:.3g}M" if n >= 999_500 else f"{round(n / 1e3)}K"
+
+
+def _facts_label(info: dict, max_out: int = 0) -> str:
+    """'ctx 1M, out 128K, $4/$20' — price is $ per 1M input/output tokens."""
+    limit = info.get("limit") or {}
+    parts = [f"ctx {_tokens(limit['context'])}"] if limit.get("context") else []
+    out = limit.get("output") or max_out
+    parts.append(f"out {_tokens(out)}" if out else "out ?")
+    cost = info.get("cost") or {}
+    if "input" in cost and "output" in cost:
+        free = not (cost["input"] or cost["output"])
+        price = "free" if free else f"${cost['input']:.3g}/${cost['output']:.3g}"
+        # Tier on output price: that is what a book's worth of prose costs.
+        tier = "32" if cost["output"] < 1 else "33" if cost["output"] < 5 else "31"
+        parts.append(_color(price, tier))
+    else:
+        parts.append("$?")
+    return ", ".join(parts)
+
+
+def _color(text: str, code: str) -> str:
+    """ANSI-colored text on a terminal; plain when piped or NO_COLOR is set."""
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    os.system("")  # turns on ANSI escape handling in the Windows console
+    return f"\033[{code}m{text}\033[0m"
 
 
 def _live_model_ids(provider: str) -> set[str] | None:
@@ -253,18 +347,17 @@ def _prompt_openai_model(
 ) -> str:
     options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
     print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
+    width = max(map(len, options))
     for index, model in enumerate(options, 1):
         context, output = model_info.get(model, (None, None)) if model_info is not None else (None, None)
-        limits = []
-        if context:
-            limits.append(f"context {context:,}")
-        if output:
-            limits.append(f"max output {output:,}")
-        detail = f" — {', '.join(limits)}" if limits else ""
+        info = _model_facts("openai", model)
+        # The OAuth endpoint's own figures win over models.dev when it reports them.
+        reported = {k: v for k, v in (("context", context), ("output", output)) if v}
+        info = {**info, "limit": {**(info.get("limit") or {}), **reported}}
         marker = " (default)" if model == default_model else ""
-        print(f"  {index}. {model}{detail}{marker}")
-    if model_info is not None and not any(context or output for context, output in model_info.values()):
-        print("  Context/output limits: not reported by the OAuth /v1/models endpoint.")
+        print(f"  {index:2d}. {model:<{width}}  {_facts_label(info)}{marker}")
+    paid_by = "; your ChatGPT subscription pays" if model_info is not None else ""
+    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
     prompt = f"Choose model number or id [default: {default_model}]: "
 
     while True:
@@ -326,10 +419,14 @@ def _prompt_catalogue_model(provider: str, default_model: str) -> str:
     label = PROVIDER_LABELS.get(provider, provider)
     model_ids = list(models.keys())
     print(f"Available {label} models:")
+    width = max(map(len, model_ids))
     for i, mid in enumerate(model_ids, 1):
         name, max_out = models[mid]
         marker = " (default)" if mid == default_model else ""
-        print(f"  {i:2d}. {mid} — {name} (max output {max_out:,}){marker}")
+        facts = _facts_label(_model_facts(provider, mid), max_out)
+        print(f"  {i:2d}. {mid:<{width}}  {facts}{marker}")
+    paid_by = "; your subscription pays" if provider in SUBSCRIPTION_PROVIDERS else ""
+    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
     prompt = f"Choose model number or id [default: {default_model}]: "
 
     while True:
@@ -525,6 +622,12 @@ def run(
                 os.environ[key] = str(max_out)
             else:
                 os.environ.pop(key, None)
+    else:
+        # No model menu for these providers; still show what the config runs on.
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        for mid in dict.fromkeys(filter(None, (data.get("writing_model"), data.get("review_model")))):
+            print(f"Model {mid}: {_facts_label(_model_facts(provider, mid))} ($ per 1M in/out)")
 
     _save_last_provider(provider, openai_model, catalogue_model)
 
