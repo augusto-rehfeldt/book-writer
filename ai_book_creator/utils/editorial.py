@@ -40,7 +40,9 @@ def _continuity_problem(result: dict):
 def update_continuity(ai_service, text: str, previous: str = "", title: str = "") -> str:
     """Read every passage, carrying forward a compact factual record."""
     memory = previous
-    for index, passage in enumerate(text_chunks(text), 1):
+    passages = list(text_chunks(text))
+    for index, passage in enumerate(passages, 1):
+        print(f"    continuity passage {index}/{len(passages)}...")
         prompt = (
             "Update a continuity record from this manuscript passage. Return JSON only: "
             '{"continuity": "record, at most 600 words"}. Preserve unresolved earlier '

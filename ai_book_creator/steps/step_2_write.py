@@ -186,6 +186,7 @@ class WriteStep(BaseStep):
                                  "total_word_count": total_word_count + word_count})
             self.project_manager.save_project()
             context_hash = text_digest(memory)
+            print("  Updating continuity record...")
             memory = update_continuity(self.ai_service, text, memory, chapter_data["title"])
             previous_ending = text[-2500:]
 
@@ -204,6 +205,7 @@ class WriteStep(BaseStep):
             total_word_count += word_count
             
             if self.glossary_manager:
+                print("  Updating glossary from chapter...")
                 self.glossary_manager.auto_populate_from_chapter(
                     text, chapter_data['title'], self.ai_service
                 )
