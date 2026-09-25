@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import colorsys
 import json
+import math
 import os
 import re
 import shutil
@@ -71,6 +73,8 @@ MODELS_DEV_SOURCES = {
 # Artificial Analysis Intelligence Index per model, cached a day like models.dev.
 AA_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
 AA_CACHE = Path.home() / ".cache" / "ai-book-creator" / "artificial_analysis.json"
+# `cmdc --list-models` takes 5-25 s, so its listing is reused for a day.
+CMDC_MODELS_CACHE = Path.home() / ".cache" / "ai-book-creator" / "cmdc_models.txt"
 # Slug words that only name a reasoning setting or release channel.
 AA_VARIANT_WORDS = frozenset(
     "thinking reasoning nonreasoning non adaptive preview exp low medium high xhigh max minimal".split()
@@ -198,29 +202,72 @@ def _tokens(n: int) -> str:
     return f"{n / 1e6:.3g}M" if n >= 999_500 else f"{round(n / 1e3)}K"
 
 
-def _facts_label(info: dict, max_out: int = 0) -> str:
-    """'ctx 1M, out 128K, $4/$20' — price is $ per 1M input/output tokens."""
-    # Green good, yellow middling, red poor.
-    def tier(value: float, good: float, ok: float) -> str:
-        return "32" if value >= good else "33" if value >= ok else "31"
+SORT_KEYS = {"price": "price", "ctx": "context", "AA": "intelligence", "score": "aggregate score"}
 
-    limit = info.get("limit") or {}
-    context = limit.get("context")
-    parts = [_color(f"ctx {_tokens(context)}", tier(context, 900_000, 250_000))] if context else []
-    out = limit.get("output") or max_out
-    parts.append(_color(f"out {_tokens(out)}", tier(out, 128_000, 64_000)) if out else "out ?")
+
+def _scales(infos: list[dict]) -> list[dict]:
+    """Each model's ctx, price and AA scaled 0..1 across the menu (1 = best), plus
+    "score": their mean, with a metric the model lacks counted as 0."""
+    def raw(info: dict) -> dict:
+        ctx = (info.get("limit") or {}).get("context")
+        cost = info.get("cost") or {}
+        # Logs: context and price span orders of magnitude. Output price is what
+        # a book's worth of prose costs.
+        return {"ctx": math.log(ctx) if ctx else None,
+                "price": -math.log1p(cost["output"]) if "output" in cost else None,
+                "AA": info.get("intelligence")}
+
+    raws = [raw(i) for i in infos]
+    scaled: list[dict] = [{} for _ in infos]
+    present = [k for k in ("ctx", "price", "AA") if any(r[k] is not None for r in raws)]
+    for key in present:
+        values = [r[key] for r in raws if r[key] is not None]
+        lo, hi = min(values), max(values)
+        for r, s in zip(raws, scaled):
+            if r[key] is not None:
+                s[key] = (r[key] - lo) / (hi - lo) if hi > lo else 1.0
+    for s in scaled:
+        s["score"] = sum(s.values()) / len(present) if present else 0.0
+    # Rescale the score too, so its colors also run from the menu's worst to best.
+    lo, hi = min((s["score"] for s in scaled), default=0), max((s["score"] for s in scaled), default=0)
+    for s in scaled:
+        s["score_t"] = (s["score"] - lo) / (hi - lo) if hi > lo else 1.0
+    return scaled
+
+
+def _gradient(text: str, t: float | None) -> str:
+    """t 0..1 colors red through orange and yellow to bright green (24-bit).
+
+    The red end stays bright enough to read on a dark console (low vision).
+    """
+    if t is None:
+        return text
+    r, g, b = colorsys.hsv_to_rgb(t / 3, 1, 0.8 + 0.2 * t)
+    return _color(text, f"38;2;{round(r * 255)};{round(g * 255)};{round(b * 255)}")
+
+
+def _facts_label(info: dict, scale: dict | None = None) -> str:
+    """'ctx 1M | $4/$20 | AA 45 -> 72' — price is $ per 1M input/output tokens.
+
+    scale (from _scales) colors each figure; the arrow and aggregate score need it.
+    """
+    scale = scale or {}
+    context = (info.get("limit") or {}).get("context")
+    parts = [_gradient(f"ctx {_tokens(context)}", scale.get("ctx")) if context else "ctx ?"]
     cost = info.get("cost") or {}
     if "input" in cost and "output" in cost:
         free = not (cost["input"] or cost["output"])
         price = "free" if free else f"${cost['input']:.3g}/${cost['output']:.3g}"
-        # Tier on output price: that is what a book's worth of prose costs.
-        parts.append(_color(price, tier(-cost["output"], -1, -5)))
+        parts.append(_gradient(price, scale.get("price")))
     else:
         parts.append("$?")
     if _artificial_analysis():
         score = info.get("intelligence")
-        parts.append(_color(f"AA {score:.0f}", tier(score, 45, 30)) if score is not None else "AA ?")
-    return ", ".join(parts)
+        parts.append(_gradient(f"AA {score:.0f}", scale.get("AA")) if score is not None else "AA ?")
+    label = " | ".join(parts)
+    if "score" in scale:
+        label += " -> " + _gradient(f"{scale['score'] * 100:.0f}", scale["score_t"])
+    return label
 
 
 def _cost_key(info: dict) -> tuple:
@@ -243,11 +290,21 @@ def _live_model_ids(provider: str) -> set[str] | None:
     """Model ids the provider serves right now, or None when it can't be asked."""
     try:
         if provider == "commandcode":
-            listing = subprocess.run(
-                [shutil.which("cmdc") or "cmdc", "--list-models"],
-                capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
-            ).stdout
-            return {line.split()[0].lower() for line in listing.splitlines() if line.strip()}
+            try:
+                fresh = time.time() - CMDC_MODELS_CACHE.stat().st_mtime < 86400
+            except OSError:
+                fresh = False
+            if fresh:
+                listing = CMDC_MODELS_CACHE.read_text(encoding="utf-8")
+            else:
+                listing = subprocess.run(
+                    [shutil.which("cmdc") or "cmdc", "--list-models"],
+                    capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
+                ).stdout
+                if listing.strip():
+                    CMDC_MODELS_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                    CMDC_MODELS_CACHE.write_text(listing, encoding="utf-8")
+            return {line.split()[0].lower() for line in listing.splitlines() if line.strip()} or None
         with open(PROVIDER_CONFIG_MAP[provider], "r", encoding="utf-8") as f:
             data = json.load(f)
         if not data.get("base_url"):
@@ -458,40 +515,94 @@ def _prompt_openai_model(
     role: str = "",
 ) -> str:
     options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
-    options = tuple(sorted(options, key=lambda m: _cost_key(_model_facts("openai", m))))
-    print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
-    width = max(map(len, options))
-    for index, model in enumerate(options, 1):
+    rows = []
+    for model in options:
         context, output = model_info.get(model, (None, None)) if model_info is not None else (None, None)
         info = _model_facts("openai", model)
         # The OAuth endpoint's own figures win over models.dev when it reports them.
         reported = {k: v for k, v in (("context", context), ("output", output)) if v}
-        info = {**info, "limit": {**(info.get("limit") or {}), **reported}}
-        marker = " (default)" if model == default_model else ""
-        print(f"  {index:2d}. {model:<{width}}  {_facts_label(info)}{marker}")
+        rows.append((model, {**info, "limit": {**(info.get("limit") or {}), **reported}}))
+    title = "Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:"
     paid_by = "; your ChatGPT subscription pays" if model_info is not None else ""
-    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
-    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
+    return _pick_model(title, rows, default_model, role, paid_by,
+                       None if model_info is not None else _normalize_openai_model)
 
+
+def _read_choice(prompt: str, on_tab) -> str:
+    """input(), except on a Windows console Tab calls on_tab() and keeps reading."""
+    if os.name != "nt" or not sys.stdin.isatty():
+        # ponytail: no Tab re-sort off Windows; termios raw mode if that's ever needed.
+        return input(prompt)
+    import msvcrt
+    typed = ""
+    print(prompt, end="", flush=True)
+    while True:
+        ch = msvcrt.getwch()
+        if ch in "\r\n":
+            print()
+            return typed
+        if ch == "\t":
+            on_tab()
+            print(prompt + typed, end="", flush=True)
+        elif ch == "\x03":
+            raise KeyboardInterrupt
+        elif ch == "\x1a":
+            raise EOFError
+        elif ch == "\x08":
+            if typed:
+                typed = typed[:-1]
+                print("\b \b", end="", flush=True)
+        elif ch in "\x00\xe0":
+            msvcrt.getwch()  # arrow/function key: second half of its code
+        elif ch.isprintable():
+            typed += ch
+            print(ch, end="", flush=True)
+
+
+def _pick_model(title: str, rows: list[tuple[str, dict]], default_model: str, role: str,
+                paid_by: str, normalize=None) -> str:
+    """Numbered model menu; Tab re-sorts it by the next of SORT_KEYS, best first."""
+    ids = [mid for mid, _ in sorted(rows, key=lambda row: _cost_key(row[1]))]
+    infos = dict(rows)
+    scales = dict(zip(infos, _scales(list(infos.values()))))
+    width = max(map(len, ids))
+    state = {"sort": 0, "order": ids, "below": 0}
+
+    def render() -> None:
+        key = list(SORT_KEYS)[state["sort"]]
+        # Stable over the price order, so ties stay cheapest first; unknowns go last.
+        state["order"] = sorted(ids, key=lambda mid: -scales[mid].get(key, -1))
+        print(f"{title}  [sorted by {SORT_KEYS[key]}; Tab: next]")
+        for i, mid in enumerate(state["order"], 1):
+            marker = " (default)" if mid == default_model else ""
+            print(f"  {i:2d}. {mid:<{width}}  {_facts_label(infos[mid], scales[mid])}{marker}")
+        print(f"  $ = API list price per 1M in/out tokens{paid_by}; -> = aggregate score 0-100.")
+
+    def next_sort() -> None:
+        state["sort"] = (state["sort"] + 1) % len(SORT_KEYS)
+        # Back to the title line, clear everything below it, draw again.
+        print(f"\r\033[{len(ids) + 2 + state['below']}A\033[J", end="")
+        state["below"] = 0
+        render()
+
+    os.system("")  # ANSI cursor codes on the Windows console
+    render()
+    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
     while True:
         try:
-            choice = input(prompt).strip()
+            choice = _read_choice(prompt, next_sort).strip()
         except EOFError:
             return default_model
-
         if not choice:
             return default_model
-
-        if choice.isdigit() and 1 <= int(choice) <= len(options):
-            return options[int(choice) - 1]
-        model = choice.lower()
-        if model in options:
-            return model
-        if model_info is None:
-            model = _normalize_openai_model(choice)
-            if model in options:
+        order = state["order"]
+        if choice.isdigit() and 1 <= int(choice) <= len(order):
+            return order[int(choice) - 1]
+        for model in (choice.lower(), normalize(choice) if normalize else None):
+            if model in infos:
                 return model
-        print(f"Please choose a number from 1 to {len(options)} or a listed model id.")
+        print(f"Choose a number from 1 to {len(order)} or a listed model id.")
+        state["below"] += 2  # the answered prompt line and this one
 
 
 def _default_catalogue_model(provider: str) -> str:
@@ -533,33 +644,9 @@ PROVIDER_LABELS = {
 def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -> str:
     models = _provider_models(provider)
     label = PROVIDER_LABELS.get(provider, provider)
-    model_ids = sorted(models, key=lambda mid: _cost_key(_model_facts(provider, mid)))
-    print(f"Available {label} models:")
-    width = max(map(len, model_ids))
-    for i, mid in enumerate(model_ids, 1):
-        name, max_out = models[mid]
-        marker = " (default)" if mid == default_model else ""
-        facts = _facts_label(_model_facts(provider, mid), max_out)
-        print(f"  {i:2d}. {mid:<{width}}  {facts}{marker}")
+    rows = [(mid, _model_facts(provider, mid)) for mid in models]
     paid_by = "; your subscription pays" if provider in SUBSCRIPTION_PROVIDERS else ""
-    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
-    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
-
-    while True:
-        try:
-            choice = input(prompt).strip().lower()
-        except EOFError:
-            return default_model
-
-        if not choice:
-            return default_model
-        if choice in models:
-            return choice
-        if choice.isdigit():
-            idx = int(choice)
-            if 1 <= idx <= len(model_ids):
-                return model_ids[idx - 1]
-        print(f"Invalid choice. Enter a number 1-{len(model_ids)} or a model id.")
+    return _pick_model(f"Available {label} models:", rows, default_model, role, paid_by)
 
 
 def _prompt_resume_existing_project() -> bool:
@@ -796,10 +883,25 @@ def run(
     continuous: bool = False,
     publish_kdp: bool = False,
     kdp_visible: bool = False,
+    *,
+    ask_models: bool = False,
+    resume: bool = False,
+    forever: bool = False,
+    pause: int = 0,
+    retry_wait: int = 900,
+    publish: str = "",
 ) -> bool:
-    choose_ai(provider, mode)
+    choose_ai(provider, "review" if ask_models else mode)
+    publish = publish or ("kdp" if publish_kdp else "")
 
-    if fresh:
+    if resume and not PROJECT_STATE_FILE.exists():
+        raise ValueError(f"--resume: no saved project at {PROJECT_STATE_FILE}")
+    if os.getenv("AI_BOOK_IDEA") and PROJECT_STATE_FILE.exists() and not fresh:
+        raise ValueError("A saved project exists, so the idea would be ignored. Add --fresh to "
+                         "archive its ebooks and start the idea, or drop the idea to resume it.")
+    if resume:
+        print("Resuming existing project.")
+    elif fresh:
         if mode == "auto":
             _stash_previous_ebook_files()
             _clear_project_output()
@@ -825,26 +927,52 @@ def run(
     while True:
         creator = AIBookCreator()
         completed = creator.create_book()
-        if completed and publish_kdp:
-            from .utils.kdp_publisher import publish_package
-
-            publishing = creator.project_manager.get_step_data("publishing")
-            try:
-                publish_package(
-                    publishing["package_file"],
-                    headless=not kdp_visible,
-                    ai_service=creator.ai_service,
-                )
-            except Exception as exc:
-                print(f"KDP publishing deferred; saved draft will remain ready to resume: {exc}")
-        if not continuous or not completed:
+        if completed and publish:
+            _publish(creator, publish, kdp_visible)
+        if not completed and forever:
+            # Budget pauses, provider outages and broken steps all leave resumable
+            # state; wait and pick the same project up again.
+            # ponytail: retries the same project indefinitely; add a failure cap if one
+            # book can wedge the loop for good.
+            print(f"\nForever mode: book not finished; resuming in {retry_wait}s.")
+            time.sleep(retry_wait)
+            continue
+        if not (continuous or forever) or not completed:
             return completed
 
+        # The user's idea seeds the first project only; the AI invents the rest.
+        os.environ.pop("AI_BOOK_IDEA", None)
         moved = _stash_previous_ebook_files()
         if moved:
             print(f"Archived completed KDP package to: {moved[0].parent}")
         _clear_project_output()
-        print("\nContinuous mode: starting the next book.")
+        if pause:
+            time.sleep(pause)
+        print("\nContinuous mode: starting the next project.")
+
+
+def _publish(creator, target: str, kdp_visible: bool = False) -> str:
+    """KDP first when asked; GitHub release when KDP fails or is not wanted."""
+    package = creator.project_manager.get_step_data("publishing").get("package_file", "")
+    if not package:
+        print("Publishing skipped: no package was prepared.")
+        return ""
+    if target == "kdp":
+        from .utils.kdp_publisher import publish_package
+
+        try:
+            publish_package(package, headless=not kdp_visible, ai_service=creator.ai_service)
+            return "kdp"
+        except Exception as exc:
+            print(f"KDP publishing failed ({exc}); trying GitHub.")
+    from .utils import github_publisher
+
+    try:
+        print(f"Published on GitHub: {github_publisher.publish_package(package)}")
+        return "github"
+    except Exception as exc:
+        print(f"GitHub publishing skipped: {exc}")
+        return ""
 
 
 def _range_arg(value: str) -> str:
@@ -858,6 +986,9 @@ def _range_arg(value: str) -> str:
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Create and package an AI-assisted book.")
+    parser.add_argument("idea", nargs="*",
+                        help="book idea, anywhere on the line (quoted or not): the first project's "
+                             "concept in any mode; later --forever projects are the AI's")
     parser.add_argument("--mode", choices=("review", "auto"), default=os.getenv("AI_BOOK_MODE", "review"))
     parser.add_argument("--provider", choices=tuple(PROVIDER_CONFIG_MAP))
     parser.add_argument("--author")
@@ -876,13 +1007,42 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="show Chrome during KDP publishing (headless is the default)",
     )
+    parser.add_argument("--publish", action="store_true",
+                        help="publish each finished book on KDP, falling back to a GitHub release")
+    parser.add_argument("--publish-github", action="store_true",
+                        help="publish each finished book as a GitHub release, skipping KDP")
     parser.add_argument("--fresh", action="store_true", help="archive old ebook assets and start a new project")
     parser.add_argument(
         "--continuous",
         action="store_true",
         help="keep creating and packaging new books until interrupted or the provider stops",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--auto",
+        action="store_true",
+        help="ask only for provider and models; the AI invents the idea and makes every choice",
+    )
+    parser.add_argument(
+        "--forever",
+        action="store_true",
+        help="--auto, then start a new project after each finished book or series; "
+             "unfinished work is resumed after --retry-wait",
+    )
+    parser.add_argument("--resume", action="store_true", help="resume the saved project without asking")
+    parser.add_argument("--pause", type=int, default=0, help="seconds between projects in --forever")
+    parser.add_argument("--retry-wait", type=int, default=900,
+                        help="seconds before --forever resumes an unfinished book")
+    # Intermixed: the idea's words may sit before, between or after the options.
+    args = parser.parse_intermixed_args()
+    args.idea = " ".join(args.idea).strip()
+    args.publish = "github" if args.publish_github else "kdp" if args.publish else ""
+    if args.forever:
+        args.auto = True
+    if args.auto:
+        args.mode = "auto"
+    if args.resume and args.fresh:
+        parser.error("--resume and --fresh contradict each other")
+    return args
 
 
 def _existing_author() -> str:
@@ -905,6 +1065,8 @@ def main() -> None:
         if args.kdp_visible and not args.publish_kdp:
             raise ValueError("--kdp-visible requires --publish-kdp")
         os.environ["AI_BOOK_MODE"] = args.mode
+        if args.idea:
+            os.environ["AI_BOOK_IDEA"] = args.idea
         author = args.author or os.getenv("AI_BOOK_AUTHOR") or _existing_author()
         if not author and args.mode == "review":
             author = input("Author name [AI Book Creator]: ").strip()
@@ -923,7 +1085,8 @@ def main() -> None:
         os.environ["AI_BOOK_COVER_SOURCE"] = args.cover_source or "pollinations"
 
         default_provider = _load_last_provider()
-        provider = args.provider or (default_provider if args.mode == "auto" else _prompt_provider(default_provider))
+        provider = args.provider or (default_provider if args.mode == "auto" and not args.auto
+                                     else _prompt_provider(default_provider))
         run(
             provider,
             args.mode,
@@ -931,6 +1094,12 @@ def main() -> None:
             args.continuous,
             args.publish_kdp,
             args.kdp_visible,
+            ask_models=args.auto,
+            resume=args.resume,
+            forever=args.forever,
+            pause=args.pause,
+            retry_wait=args.retry_wait,
+            publish=args.publish or "",
         )
     except KeyboardInterrupt:
         print("\n\nProcess interrupted by user. Progress has been saved.")

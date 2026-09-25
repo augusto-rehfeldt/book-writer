@@ -277,6 +277,37 @@ Each completed KDP package is archived under `book_output/archive/ebooks/`
 before the next book starts. If a run is interrupted or rejected by the
 provider, its current progress remains resumable.
 
+Hands-off modes ask only for the provider and models, then decide everything
+else themselves: the AI invents the idea, chooses a standalone or a 2-5 book
+series, picks plot direction, title, length and chapters:
+
+```bash
+python main.py --auto                      # one book or series, then stop
+python main.py --auto "a lighthouse keeper who forges ship manifests"   # your idea, AI does the rest
+python main.py --forever "your idea" --publish   # your idea first, then AI-invented projects forever
+python main.py --forever --publish         # new project after each finished one, publish each
+python main.py --resume                    # continue the saved project without asking
+```
+
+The idea can sit anywhere on the command line, quoted or not, and works in
+review mode too, where it replaces the idea question. In auto modes it seeds
+only the first project: the AI develops it (keeping what
+you specified and deciding standalone vs series unless `--series` is given), and
+every later `--forever` project is its own invention with no questions. With a
+saved unfinished project, add `--fresh` to start the idea instead.
+
+`--forever` resumes an unfinished book after `--retry-wait` seconds (default
+900) instead of stopping on budget pauses or provider errors; `--pause N` waits
+between projects. `--mode auto` still skips the provider and model menus too.
+
+`--publish` submits to KDP and, if that fails, posts a free GitHub release
+carrying the EPUB and cover; `--publish-github` skips KDP.
+The release repository comes from `AI_BOOK_GITHUB_REPO=OWNER/NAME` and must be
+owned by a pen-name account or organization: the personal account the `gh` CLI
+is logged in with is refused, because books appear under the pen name only. A
+release is public the moment it is created; its URL is saved in the `_kdp.json`
+package so a resumed run never posts twice.
+
 The equivalent explicit option is:
 
 ```bash

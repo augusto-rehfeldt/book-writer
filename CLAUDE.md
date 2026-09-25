@@ -19,13 +19,15 @@ AI book generation pipeline: idea → structure → chapters → review → EPUB
   they are not proof of authorship or literary quality.
 
 ## Commands
-- Run: `python main.py`
+- Run: `python main.py` (`[idea words]`, `--auto`, `--forever`, `--publish`/`--publish-github`, `--resume`; see README)
 - Test: `pytest`
 - Deps: `pip install -r requirements.txt`
 - Humanness of one file: `python -m ai_book_creator.utils.humanizer book_output/chapter_01.txt`
 - Rebuild the prose baseline: `python benchmarks/build_prose_baseline.py --books 60`
 - Re-measure chapter lengths: `python benchmarks/measure_chapter_shape.py`
 - Novels vs. own drafts: `python benchmarks/build_prose_baseline.py --bench`
+- Phrases drafts overuse vs. cached novels: `python benchmarks/build_prose_baseline.py --tells`
+  (candidates for `humanizer.LLM_TELLS`; read the list, a book's own terms show up too)
 
 ## Providers
 `cli.PROVIDER_CONFIG_MAP` maps a provider name to its config file; anything in
@@ -44,8 +46,11 @@ Menus print context, max output and list price per 1M tokens from models.dev
 old, else live). Display only: the config's `max_output` is still the cap sent.
 With `ARTIFICIAL_ANALYSIS_API_KEY` set, menus also show the Artificial Analysis
 Intelligence Index (`cli._intelligence`, cached a day in
-`~/.cache/ai-book-creator/artificial_analysis.json`). Models are sorted by price.
-Context, output, price and AA are colored green/yellow/red in `_facts_label`.
+`~/.cache/ai-book-creator/artificial_analysis.json`). Rows read
+`ctx | $in/$out | AA -> aggregate`: `_scales` puts each metric on 0..1 across the menu
+(log for context and output price) and averages them into the aggregate (missing = 0);
+`_gradient` colors each from red (kept bright for low vision) to bright green in 24-bit color. `_pick_model`
+sorts by price first; Tab on a Windows console re-sorts by context, AA, then aggregate.
 
 - `claude` — the Claude Code CLI in print mode, on the user's subscription, no
   key. The prompt goes in **on stdin, never in argv**: Windows caps a command
@@ -85,7 +90,16 @@ Context, output, price and AA are colored green/yellow/red in `_facts_label`.
   scene-based length estimates to the total. Do not restore randomized tempo,
   shuffled chapter budgets, or automatic page-count padding.
 - Step 2 supplies the approved layout, glossary, rolling continuity record, and
-  the preceding ending. Continuity extraction reads every passage and records
+  the preceding ending. Before the first chapter it derives a voice bible from the
+  layout (`editorial.voice_bible`: per-character voice cards and named world texture),
+  cached as `init.voice_bible`; `story_context` hands it to every later prompt.
+  The draft's repair pass checks `editorial.REVISION_CHECKS` (LAMP editor categories
+  plus measured habits such as narration by negation and people known only by role),
+  plus dialogue lines `editorial.indistinct_lines` could not attribute to their speaker
+  from wording and voice cards alone (two review calls per chapter, skipped without
+  voice cards or with under six lines).
+- GitHub publishing (`utils/github_publisher.py`) refuses any repo owned by the
+  logged-in personal account: the pen-name rule covers the host account too. Continuity extraction reads every passage and records
   character knowledge, chronology, motivation and unresolved threads.
 - `utils/editorial.py` applies exact nonoverlapping edits. All unselected prose
   remains intact. Headings, scene breaks and length bounds are checked locally;

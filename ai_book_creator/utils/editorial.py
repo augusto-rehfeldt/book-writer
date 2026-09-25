@@ -8,18 +8,96 @@ from .text_utils import ask_json, parse_json, text_chunks, text_digest
 EDITORIAL_CRITERIA = (
     "Causal continuity; believable motivation and emotional change; distinct character "
     "voices; concrete, viewpoint-specific detail; useful subtext; clear spatial action; "
-    "pacing appropriate to the scene; no redundant explanation. Preserve deliberate "
-    "ambiguity, idiom, rough edges, refrains and quiet narration. A statistical style "
-    "outlier alone is not a defect. Do not add dialogue, adverbs or sentence shapes "
-    "to meet a quota. Do not estimate who wrote the prose."
+    "pacing appropriate to the scene; no redundant explanation. Named, world-specific "
+    "things over generic nouns; humor and opinion where the character has them. Preserve "
+    "deliberate ambiguity, idiom, rough edges, digressions, refrains and quiet narration. "
+    "A statistical style outlier alone is not a defect. Do not add dialogue, adverbs or "
+    "sentence shapes to meet a quota. Do not estimate who wrote the prose."
+)
+
+# Professional editors' recurring fixes to LLM fiction (Chakrabarty et al., CHI 2025,
+# LAMP) plus the narrative habits StoryScope (2026) found separate AI fiction.
+REVISION_CHECKS = (
+    "Look for: clichés and stock phrases; exposition that restates what a scene already "
+    "showed, including a closing line that explains its meaning; aphoristic kicker lines "
+    "that end a paragraph on a neat maxim; purple or overwrought phrasing; awkward word "
+    "choice; generic unnamed things ('the vessel', 'the food') where the world has a "
+    "name for them; recurring people known only by role ('the clerk', 'the official') "
+    "where someone would know their name; narration built on what a character did not "
+    "do or say ('She did not ask. He did not answer.') instead of what happened; "
+    "dialogue lines that any character could have spoken, judged against "
+    "the voice cards; everyone speaking in the same clipped register."
 )
 
 
+def voice_bible(ai_service, init_data: dict) -> str:
+    """Character voice cards and world texture, derived once from the approved plan.
+
+    Research on LLM fiction finds characters that sound alike and worlds without
+    proper nouns; this gives the writer concrete, book-specific material to draw on
+    instead of quotas.
+    """
+    return ai_service.generate_content(
+        "From this approved book plan, write a voice bible for the novelist. Keep every "
+        "name exactly as given; add no plot events.\n\n"
+        "VOICE CARDS: for each main character, a short card with: vocabulary their work, "
+        "place and upbringing give them (the metaphors they reach for); verbal tics and "
+        "pet phrases; how much they talk and how that changes under stress (some talk more, "
+        "circle, over-explain; not everyone goes terse); how they dodge a question; "
+        "what they would never say aloud; swearing and formality; what they find funny and "
+        "how they joke; one story or grievance they keep coming back to; three sample lines "
+        "of their speech in different moods.\n\n"
+        "WORLD TEXTURE: named things the characters live among, fitting the setting and "
+        "period: foods and drinks, brands or makers, money and prices, songs, games, "
+        "sayings and proverbs, curses, local institutions and nicknames, a running local "
+        "joke, and the everyday objects the plot will need, each with its name in this "
+        "world. For a real historical setting use only things that existed then.\n\n"
+        "Plain text, compact, no commentary.\n\n"
+        f"BOOK CONCEPT:\n{init_data.get('book_idea', '')}\n\n"
+        f"BOOK PLAN:\n{init_data.get('layout_content', '')}",
+        model_type="writing", max_completion_tokens=4000).strip()
+
+
+_DIALOGUE = re.compile(r"[“\"]([^”\"\n]{15,400})[”\"]")
+
+
+def _speakers(result: dict):
+    return None if isinstance(result.get("speakers"), dict) else 'expected {"speakers": {...}}'
+
+
+def indistinct_lines(ai_service, text: str, bible: str, limit: int = 60) -> list:
+    """Dialogue a reader could not attribute from its words and the voice cards alone.
+
+    One call names each line's speaker with the chapter in view; a second guesses
+    from the line and the voice cards only. Disagreement means the line has no voice
+    of its own. Research finds LLM characters sound alike; this measures it per book.
+    """
+    lines = _DIALOGUE.findall(text)[:limit]
+    if len(lines) < 6 or not bible.strip():
+        return []
+    numbered = "\n".join(f"{i}. {line}" for i, line in enumerate(lines, 1))
+    reply = 'Return JSON only: {"speakers": {"1": "Name", ...}}; use "unknown" when unsure.'
+    truth = ask_json(ai_service, f"Who speaks each numbered line in this chapter? {reply}\n\n"
+                     f"CHAPTER:\n{text}\n\nLINES:\n{numbered}", _speakers,
+                     "Invalid speaker list", model_type="review", max_completion_tokens=2048)["speakers"]
+    guess = ask_json(ai_service, "Guess who says each numbered line from its wording alone, using "
+                     f"only these voice cards; you have no other context. {reply}\n\n"
+                     f"VOICE CARDS:\n{bible}\n\nLINES:\n{numbered}", _speakers,
+                     "Invalid speaker guesses", model_type="review", max_completion_tokens=2048)["speakers"]
+    first = lambda name: str(name or "").strip().lower().split(" ")[0]
+    return [lines[int(k) - 1] for k, who in truth.items()
+            if str(k).isdigit() and 0 < int(k) <= len(lines) and first(who) not in ("", "unknown")
+            and first(guess.get(k)) != first(who)]
+
+
 def story_context(init_data: dict, memory: str = "", glossary: str = "") -> str:
+    bible = init_data.get("voice_bible", "")
     return (
         f"BOOK CONCEPT:\n{init_data.get('book_idea', '')}\n\n"
         f"BOOK PLAN AND VOICE (intentions, not events already experienced):\n"
         f"{init_data.get('layout_content', '')}\n\n"
+        + (f"VOICE CARDS AND WORLD TEXTURE (draw on these; not events):\n{bible}\n\n"
+           if bible else "") +
         f"CANONICAL IDENTITIES (planned descriptions may contain future events):\n{glossary}\n\n"
         f"STORY SO FAR, FROM FINISHED PROSE:\n{memory or 'The book has not begun.'}\n\n"
         "Finished prose takes precedence over the plan. Do not give characters knowledge "

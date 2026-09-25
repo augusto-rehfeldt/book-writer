@@ -480,7 +480,11 @@ class StructureStep(BaseStep):
                     "Names and identities in the approved layout are fixed. Reuse them exactly. "
                     "For each scene identify viewpoint, want, obstacle, choice and consequence; "
                     "omit formulaic beats where a quiet or unresolved scene calls for it. "
-                    "State how its pace follows the dramatic purpose, and carry unresolved consequences forward."
+                    "State how its pace follows the dramatic purpose, and carry unresolved consequences forward. "
+                    "Name what goes wrong or costs more than planned, what the viewpoint character "
+                    "misreads or gets wrong, and which thread stays open past this chapter. Where a "
+                    "choice matters, let it be defensible on both sides rather than plainly right. "
+                    "Do not resolve setbacks in the chapter that raises them unless the story needs it."
                 ),
                 sections=[
                     ("Book summary", init_data["book_idea"][:500]),

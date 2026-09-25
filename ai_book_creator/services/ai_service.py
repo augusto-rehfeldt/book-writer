@@ -184,10 +184,13 @@ def _cli_system(system: Optional[str]) -> str:
     return f"{CLI_NEUTRAL_SYSTEM}\n\n{system}" if system else CLI_NEUTRAL_SYSTEM
 
 
-def _run_cli(args: List[str], prompt: str, timeout: int) -> subprocess.CompletedProcess:
+def _run_cli(args: List[str], prompt: str, timeout: int,
+             env: Optional[Dict[str, str]] = None) -> subprocess.CompletedProcess:
     """The prompt goes in on stdin, never as an argument: Windows caps a command
     line at 32k characters and a chapter-sized prompt blows straight past it."""
     extra = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    if env:
+        extra["env"] = {**os.environ, **env}
     return subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
                           errors="replace", timeout=timeout, cwd=tempfile.gettempdir(), **extra)
 
@@ -258,17 +261,23 @@ def opencode_executable() -> str:
     return exe
 
 
-def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional[str] = None) -> str:
+def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional[str] = None,
+                  max_output: int = 0) -> str:
     """One completion through the OpenCode CLI, the only client opencode.ai's free tier
     answers (direct API calls get 403 FreeTierError).
 
     Runs OpenCode's stock read-only `plan` agent. The gateway also refuses a custom
     agent (measured: same 403), and the default `build` agent could edit files or run
     commands. There is no system-prompt flag, so the instruction leads the prompt.
+
+    OpenCode caps output at min(model limit, OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX or
+    32000). A reasoning model can think through all 32k and answer nothing (finish
+    reason "length", 0 output tokens), so `max_output` lifts that cap to the model's.
     """
     args = [opencode_executable(), "run", "--agent", "plan", "--format", "json",
             "-m", model if "/" in model else f"opencode/{model}"]
-    proc = _run_cli(args, f"{_cli_system(system)}\n\n{prompt}", timeout)
+    env = {"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(max_output)} if max_output else None
+    proc = _run_cli(args, f"{_cli_system(system)}\n\n{prompt}", timeout, env=env)
     texts: List[str] = []
     kinds: List[str] = []
     finish: Dict[str, Any] = {}
@@ -300,9 +309,13 @@ def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional
             detail += f"; finish reason {finish.get('reason') or 'unknown'}"
             if isinstance(tokens, dict) and "output" in tokens:
                 detail += f", {tokens['output']} output tokens"
+            if isinstance(tokens, dict) and tokens.get("reasoning"):
+                detail += f", {tokens['reasoning']} reasoning tokens"
         stderr = (proc.stderr or "").strip()
         if stderr:
             detail += f"; stderr: {stderr[:300]}"
+        if finish.get("reason") == "length":
+            raise IncompleteGenerationError(f"opencode {model} hit its output cap before answering ({detail})")
         raise RuntimeError(f"opencode {model} returned no text ({detail})")
     return out
 
@@ -1715,7 +1728,8 @@ class AIService:
                     print(f"[commandcode] returned empty content on attempt {attempt + 1}")
 
                 elif self.provider == "opencode":
-                    return opencode_chat(model_to_use, request_prompt, timeout=self.timeout, system=system)
+                    return opencode_chat(model_to_use, request_prompt, timeout=self.timeout, system=system,
+                                         max_output=completion_tokens)
 
                 elif self.provider == "google" and self.client is not None:
                     # Gemini API

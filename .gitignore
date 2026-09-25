@@ -11,6 +11,7 @@ tests/*
 !tests/test_chapter_budget.py
 !tests/test_service_contract.py
 !tests/test_shared_*.py
+!tests/test_auto_publish.py
 benchmarks/*
 !benchmarks/evaluate_prose.py
 !benchmarks/prose_cases.json

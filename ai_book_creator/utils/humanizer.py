@@ -66,6 +66,12 @@ FILTER_VERBS = ("felt", "saw", "heard", "noticed", "watched", "realized",
                 "realised", "seemed", "wondered", "knew that", "could feel",
                 "could see", "could hear")
 
+# Negation written out in full ("did not", "was not"). Novels contract most of it
+# and state what happens instead; drafts narrate what characters did not do.
+_NEG_FULL = re.compile(r"\b(?:did|do|does|was|were|is|are|could|would|had|has|have|should) not\b",
+                       re.IGNORECASE)
+# A capitalized word after a lowercase word or comma: a name, place, maker or title.
+_PROPER = re.compile(r"(?<=[a-z,;] )[A-Z][a-z]+")
 _SENT = re.compile(r"[^.!?…]+[.!?…]+[\"'”’\)\]]*|\S+$")
 _WORD = re.compile(r"[A-Za-z'’]{2,}")
 _QUOTE = re.compile(r"[\"“”]|(?<![A-Za-z])'(?=[A-Za-z])")
@@ -140,6 +146,10 @@ def fingerprint(text: str) -> Dict[str, float]:
         "filter_per_1k": round(filters / n_words * 1000, 2),
         "dash_per_1k": round(body.count("—") / n_words * 1000, 2),
         "semicolon_per_1k": round(body.count(";") / n_words * 1000, 2),
+        "neg_full_per_1k": round(len(_NEG_FULL.findall(body)) / n_words * 1000, 2),
+        "proper_per_1k": round(len(_PROPER.findall(body)) / n_words * 1000, 2),
+        "exclaim_per_1k": round(body.count("!") / n_words * 1000, 2),
+        "question_per_1k": round(body.count("?") / n_words * 1000, 2),
         # Share of sentences opening on the single most common word. Generated
         # prose funnels into "The/She/He" far harder than published fiction.
         "opener_top_share": round(openers.most_common(1)[0][1] / len(sents), 3) if sents else 0.0,
@@ -272,6 +282,15 @@ CHECKS = [
      "{bound:.1f}; let the scene happen instead of reporting it"),
     ("dash_per_1k", "high", 11.5, 1.2, 10.0,
      "em dashes at {value}/1k words, over the published ceiling {bound:.1f}"),
+    # Probed 2026-09-25 on 1,200-word windows, 60 cached novels vs this pipeline's
+    # 104k-word book: full negation p50 0.8 vs 11.1/1k; proper nouns p50 36 vs 9/1k.
+    ("neg_full_per_1k", "high", 5.0, 1.5, 12.0,
+     "negation written out in full ('did not', 'was not') at {value}/1k, over the published "
+     "ceiling {bound:.1f}; say what happens rather than what did not, and contract where the "
+     "voice would"),
+    ("proper_per_1k", "low", 11.4, 1.0, 10.0,
+     "few names ({value}/1k capitalized names, places and makers vs floor {bound:.1f}); "
+     "people, streets and things in novels have names"),
     ("ttr", "low", 0.50, 120.0, 10.0,
      "narrow vocabulary (segmental type-token {value} vs floor {bound:.2f}); the same "
      "nouns and verbs keep coming back"),

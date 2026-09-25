@@ -255,16 +255,21 @@ class ResumeTests(unittest.TestCase):
                 for number in (2, 1)}}}
             no_edits = json.dumps({"summary": "Alice waits", "issues": [], "edits": []})
             first = "# Part 1\n\n" + PROSE + " ENDING_ANCHOR"
-            ai = service(first, no_edits, json.dumps({"continuity": "KNOWLEDGE_ANCHOR"}),
+            ai = service("VOICE_ANCHOR", first, no_edits, json.dumps({"continuity": "KNOWLEDGE_ANCHOR"}),
                          "# Part 2\n\n" + PROSE, no_edits, json.dumps({"continuity": "They still wait."}))
             with patch.object(WriteStep, "_load_config", return_value={}), patch.object(humanizer, "enabled", return_value=False):
                 WriteStep(ai, pm, None, directory).execute()
             prompts = [call.args[0] for call in ai.generate_content.call_args_list]
-            self.assertIn("CHAPTER: Part 1", prompts[0])
-            self.assertIn("CHAPTER: Part 2", prompts[3])
-            self.assertIn("ENDING_ANCHOR", prompts[3])
-            self.assertIn("KNOWLEDGE_ANCHOR", prompts[3])
-            self.assertIn("Alice is the narrator.", prompts[3])
+            self.assertIn("Alice is the narrator.", prompts[0])
+            self.assertIn("VOICE CARDS", prompts[0])
+            self.assertEqual(pm.get_step_data("init")["voice_bible"], "VOICE_ANCHOR")
+            self.assertIn("CHAPTER: Part 1", prompts[1])
+            self.assertIn("VOICE_ANCHOR", prompts[1])
+            self.assertIn("CHAPTER: Part 2", prompts[4])
+            self.assertIn("ENDING_ANCHOR", prompts[4])
+            self.assertIn("KNOWLEDGE_ANCHOR", prompts[4])
+            self.assertIn("Alice is the narrator.", prompts[4])
+            self.assertIn("VOICE_ANCHOR", prompts[4])
 
     def test_review_rechecks_final_text_after_targeted_repairs(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -298,7 +303,8 @@ class ResumeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             pm = ProjectManager(directory)
             pm.book_data = {"init": {"book_idea": "A key", "layout_content": "Alice is the narrator.",
-                                      "page_count": 4}, "structure": {"chapter_plots": {
+                                      "voice_bible": "Alice: terse.", "page_count": 4},
+                            "structure": {"chapter_plots": {
                 "chapter_1": {"chapter_number": 1, "title": "Arrival", "plot_outline": "Alice waits.",
                               "word_count_estimate": 400}}}}
             draft = "# Arrival\n\n" + PROSE
@@ -317,7 +323,36 @@ class ResumeTests(unittest.TestCase):
                 self.assertEqual(resumed.get_step_data("written")["total_word_count"], len(draft.split()))
 
 
+class VoiceAttributionTests(unittest.TestCase):
+    def test_lines_guessed_wrong_from_wording_are_reported(self):
+        lines = [f"“Line number {i} is spoken here by someone.”" for i in range(1, 8)]
+        text = "\n\n".join(lines)
+        truth = {"speakers": {str(i): "Alice" if i % 2 else "Bob" for i in range(1, 8)}}
+        guess = {"speakers": {**truth["speakers"], "3": "Bob", "4": "unknown"}}
+        ai = service(json.dumps(truth), json.dumps(guess))
+        flat = editorial.indistinct_lines(ai, text, "ALICE: dry. BOB: talks a lot.")
+        self.assertEqual(flat, ["Line number 3 is spoken here by someone.",
+                                "Line number 4 is spoken here by someone."])
+        self.assertIn("VOICE CARDS", ai.generate_content.call_args_list[1].args[0])
+        self.assertNotIn("CHAPTER:", ai.generate_content.call_args_list[1].args[0])
+
+    def test_no_voice_cards_or_little_dialogue_costs_no_calls(self):
+        ai = service()
+        self.assertEqual(editorial.indistinct_lines(ai, "“Only one line of speech here.”", "cards"), [])
+        self.assertEqual(editorial.indistinct_lines(ai, PROSE, ""), [])
+        ai.generate_content.assert_not_called()
+
+
 class EvaluationTests(unittest.TestCase):
+    def test_overused_ranks_draft_habits_and_skips_names(self):
+        from benchmarks.build_prose_baseline import overused
+        human = "He went to the market and bought bread. " * 50
+        draft = "Tern looked at it, and Tern left. She did not ask. " * 10 + "He went to the market. " * 10
+        grams = [gram for gram, _, _ in overused(draft, human, sizes=(3,), min_count=5)]
+        self.assertIn("she did not", grams)
+        self.assertFalse(any("tern" in gram for gram in grams))
+        self.assertLess(grams.index("she did not"), grams.index("went to the"))
+
     def test_blind_pack_and_content_loss_are_separate_from_preferences(self):
         from benchmarks.evaluate_prose import CRITERIA, prepare, summarize
         with tempfile.TemporaryDirectory() as directory:

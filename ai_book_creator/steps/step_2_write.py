@@ -9,23 +9,22 @@ from typing import Dict, Any
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
 from ..utils import humanizer
-from ..utils.editorial import edit_text, story_context, update_continuity
+from ..utils.editorial import (REVISION_CHECKS, edit_text, indistinct_lines, story_context,
+                               update_continuity, voice_bible)
 from ..utils.text_utils import calculate_word_count, calculate_page_count, save_text, text_digest
 
 
-AUTHORIAL_PROSE_GUIDANCE = """Write from a particular consciousness. Let the viewpoint character notice what this person would notice and miss what this person would miss. Use exact physical details, plain verbs, and character-specific thoughts.
+AUTHORIAL_PROSE_GUIDANCE = """Write from a particular consciousness. Let the viewpoint character notice what this person would notice and miss what this person would miss, misremember things, and hold opinions the narration does not correct. Use exact physical details, exact quantities and prices, and the names this world gives its things: foods, songs, makers, streets, sayings. A generic noun where the world has a name is a missed detail, and so is a recurring person known only by role. Work details into the sentences where the action happens; do not list them as stand-alone fragments. Tell what people do, not a string of what they did not do, and contract negation the way people talk and think (didn't, wasn't) unless the voice is formal.
 
-Let rhythm follow the character's attention and the scene's pressure. Use short or long sentences, adverbs, semicolons and fragments when they serve the thought. Do not manufacture variation or count stylistic features. Play consequential moments as scenes; use summary to cross uneventful time.
+Let rhythm follow the character's attention and the scene's pressure. The ordinary narrative sentence is a full one, with a clause or two; fragments and one-line sentences are an effect, and in runs they flatten a scene instead of tightening it. Danger and grief do not require clipped prose. Let a thought run on through commas and "and" when the character is absorbed, remembering or talking themselves into something. Adverbs, semicolons and fragments are fine when they serve the thought. Play consequential moments as scenes; use summary to cross uneventful time.
 
-Name each thing consistently. Prefer active voice and direct verbs. Avoid nominalizations, stacked auxiliaries, vague phrasal verbs, and editorial adjectives. Keep contractions, idiom, purposeful fragments, and varied cadence when they belong to the narrator or character.
+Allow the mind to wander the way a real one does: an object calls up a memory, a joke, a grudge or an old song, and the scene continues. Keep humor that belongs to the characters, including bad jokes and the small absurdities of ordinary life. Not every detail must serve the plot.
 
-Trust the scene. Do not inflate its importance or explain an emotion after it has already been shown. Keep perception and uncertainty when they matter to the viewpoint. Let an ending follow the scene's consequence rather than adding an explanation of its meaning.
+Trust the scene. Do not explain an emotion after it has been shown, and do not end a paragraph on a neat maxim that sums up its meaning. Let an ending follow the scene's consequence. Leave some things unresolved, and let choices cost something that is not fully redeemed.
 
-Let dialogue include interruption, evasion, misunderstanding, private shorthand, and silence where those fit the characters. Nobody should make a speech merely to explain facts everyone present already knows.
+Give each character the speech on their voice card. People differ in how much they talk: one rambles, tells a half-relevant story or repeats themselves, another answers in a word. Let dialogue include interruption, evasion, non-answers, talking past each other, callbacks to earlier conversations, private shorthand, small talk with no plot purpose, and a register that changes with who is listening. Nobody should make a speech merely to explain facts everyone present already knows.
 
-Prefer specific observations over stock phrases. Keep deliberate repetitions, private shorthand and ordinary expressions when they belong to the speaker.
-
-Keep useful rough edges, ambiguity, and odd specificity. Prefer a sentence that belongs to this character and this scene over one that merely sounds polished."""
+Prefer specific observations over stock phrases. Keep useful rough edges, ambiguity and odd specificity. Prefer a sentence that belongs to this character and this scene over one that merely sounds polished."""
 
 
 class WriteStep(BaseStep):
@@ -82,6 +81,12 @@ class WriteStep(BaseStep):
         chapter_count = len(chapter_plots) or 25
         scaled_min = max(fallback_min, init_target_words // chapter_count)
         
+        if init_data.get("layout_content") and not init_data.get("voice_bible"):
+            print("\nWriting voice cards and world texture...")
+            init_data["voice_bible"] = voice_bible(self.ai_service, init_data)
+            self.project_manager.set_step_data("init", init_data)
+            self.project_manager.save_project()
+
         memory, previous_ending = "", ""
         for chapter_key, chapter_data in sorted(
                 chapter_plots.items(), key=lambda item: item[1]["chapter_number"]):
@@ -151,10 +156,16 @@ class WriteStep(BaseStep):
                 )
 
             save_text(draft_filename, text)
+            flat = indistinct_lines(self.ai_service, text, init_data.get("voice_bible", ""))
+            voice_note = (" These dialogue lines could not be told apart from another character's "
+                          "by their words alone; where the scene allows, give each its speaker's "
+                          "voice from the voice cards: " + "; ".join(f"«{line}»" for line in flat[:15])
+                          if flat else "")
             text, edits = edit_text(
                 self.ai_service, text,
                 "Repair specific weaknesses in motivation, continuity, clarity, subtext or redundant "
-                "explanation. Do not expand solely to meet a word count.",
+                "explanation. " + REVISION_CHECKS + voice_note +
+                " Do not expand solely to meet a word count.",
                 context + "\nCHAPTER OUTLINE:\n" + chapter_data["plot_outline"])
 
             # --- Humanness pass: score against real published novels, rewrite

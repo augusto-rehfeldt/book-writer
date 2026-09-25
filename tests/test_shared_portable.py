@@ -252,6 +252,16 @@ class CliIsolationTests(unittest.TestCase):
         self.assertEqual(str(raised.exception), "opencode model returned no text "
                          "(events step_start, step_finish; finish reason stop, 0 output tokens)")
 
+    def test_opencode_output_cap_is_the_models_and_thinking_to_it_is_truncation(self):
+        # OpenCode defaults to 32k output; a reasoning model can spend all of it thinking.
+        _text, call = self.run_cli(api.opencode_chat, max_output=524288,
+                                   stdout=json.dumps({"type": "text", "part": {"text": "ok"}}))
+        self.assertEqual(call.kwargs["env"]["OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX"], "524288")
+        thought_out = [{"type": "step_start"}, {"type": "step_finish", "part": {
+            "reason": "length", "tokens": {"output": 0, "reasoning": 32000}}}]
+        with self.assertRaisesRegex(api.IncompleteGenerationError, "32000 reasoning tokens"):
+            self.run_cli(api.opencode_chat, stdout="\n".join(map(json.dumps, thought_out)))
+
     def test_gui_hosts_find_npm_installed_clis(self):
         with tempfile.TemporaryDirectory() as folder:
             (Path(folder) / "cmdc.cmd").write_text("")

@@ -499,11 +499,16 @@ class AIBookCreator:
             return False
 
         prompt = f"Repair the project and restart from {restart_label}? [Y/n]: "
+        auto = os.getenv("AI_BOOK_MODE", "review").strip().lower() == "auto"
         while True:
-            try:
-                response = input(prompt).strip().lower()
-            except EOFError:
-                return False
+            if auto:
+                print(prompt + "y (auto)")
+                response = "y"
+            else:
+                try:
+                    response = input(prompt).strip().lower()
+                except EOFError:
+                    return False
 
             if response in ("", "y", "yes"):
                 self.project_manager.reset_steps_from(restart_step)

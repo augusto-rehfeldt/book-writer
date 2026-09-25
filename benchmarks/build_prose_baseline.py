@@ -8,6 +8,7 @@ of prose that a human wrote and a publisher shipped.
     python benchmarks/build_prose_baseline.py             # build the baseline
     python benchmarks/build_prose_baseline.py --books 60  # wider sample
     python benchmarks/build_prose_baseline.py --bench     # score novels vs drafts
+    python benchmarks/build_prose_baseline.py --tells     # phrases drafts overuse
 
 Extracted text is cached in ``benchmarks/corpus/`` so a rebuild costs no
 conversions. The cache is disposable and gitignored.
@@ -58,7 +59,11 @@ def ebook_convert() -> str:
 
 
 def library_books(limit: int, seed: int = 7) -> list[tuple[str, Path]]:
-    """Random English books from the Calibre library, as (title, azw3 path)."""
+    """Random English novels, one per author, as (title, book path).
+
+    One book per author: the baseline has to describe how many different people
+    write, not how the library's most prolific series author writes.
+    """
     db = CALIBRE / "metadata.db"
     if not db.exists():
         raise SystemExit(f"no Calibre library at {CALIBRE}")
@@ -66,7 +71,8 @@ def library_books(limit: int, seed: int = 7) -> list[tuple[str, Path]]:
     rows = con.execute(
         "SELECT b.title, b.path, d.name, d.format, "
         "(SELECT group_concat(t.name, '|') FROM books_tags_link bt "
-        "JOIN tags t ON t.id = bt.tag WHERE bt.book = b.id) FROM books b "
+        "JOIN tags t ON t.id = bt.tag WHERE bt.book = b.id), "
+        "(SELECT min(ba.author) FROM books_authors_link ba WHERE ba.book = b.id) FROM books b "
         "JOIN data d ON d.book = b.id "
         "JOIN books_languages_link bl ON bl.book = b.id "
         "JOIN languages l ON l.id = bl.lang_code "
@@ -74,14 +80,15 @@ def library_books(limit: int, seed: int = 7) -> list[tuple[str, Path]]:
     con.close()
     random.Random(seed).shuffle(rows)
     out = []
-    seen = set()
-    for title, path, name, fmt, tags in rows:
-        if title in seen or not is_fiction(tags or ""):
+    seen, authors = set(), set()
+    for title, path, name, fmt, tags, author in rows:
+        if title in seen or author in authors or not is_fiction(tags or ""):
             continue
         book = CALIBRE / path / f"{name}.{fmt.lower()}"
         if book.exists():
             out.append((title, book))
             seen.add(title)
+            authors.add(author)
         if len(out) >= limit:
             break
     return out
@@ -117,10 +124,15 @@ def is_fiction(tags: str) -> bool:
 
     Untagged books are excluded; correct their Calibre tags before calibration.
     """
-    tags = tags.lower()
-    if re.search(r"\b(non[ -]?fiction|biography|memoir|textbook)\b", tags):
+    tags = [t.strip() for t in tags.lower().split("|")]
+    joined = "|".join(tags)
+    # A bare "history" or "science" tag marks non-fiction in this library ("D-Day:
+    # The Battle for Normandy" carries history|alternate history).
+    if re.search(r"\b(non[ -]?fiction|biography|memoir|textbook|criticism|aesthetics)\b", joined) \
+            or "history" in tags or "science" in tags:
         return False
-    return bool(re.search(r"\b(fiction|novels?|fantasy|romance|mystery|thrillers?|horror)\b", tags))
+    return bool(re.search(r"\b(fiction|novels?|fantasy|romance|mystery|thrillers?|horror|sci-fi|"
+                          r"space opera|alternate history|post apocalyptic|dystopian|cyberpunk)\b", joined))
 
 
 def gather(limit: int, holdout: bool = False) -> list[tuple[str, str]]:
@@ -173,7 +185,8 @@ def build(limit: int) -> dict:
           f"({baseline['books']} books, {baseline['windows']} windows)")
     for metric in ("burstiness", "sent_len_mean", "short_sent_ratio", "para_cv",
                    "dialogue_ratio", "filter_per_1k", "ly_per_1k", "dash_per_1k",
-                   "opener_top_share"):
+                   "opener_top_share", "neg_full_per_1k", "proper_per_1k",
+                   "exclaim_per_1k", "question_per_1k"):
         r = ranges.get(metric, {})
         print(f"  {metric:<18} p05={r.get('p05')}  p50={r.get('p50')}  p95={r.get('p95')}")
     print(f"  phrases real novelists also use: {', '.join(corpus_ok) or 'none'}")
@@ -216,11 +229,76 @@ def bench(limit: int) -> None:
               f"max {max(human):.1f}  n={len(human)}")
         print(f"generated chapters: median {statistics.median(machine):.1f}  "
               f"min {min(machine):.1f}  n={len(machine)}")
+    if drafts:
+        print(style_table([p.read_text(encoding="utf-8", errors="replace") for p in drafts], ref))
+
+
+def style_table(chapters: list[str], ref: dict) -> str:
+    """Where the drafts sit inside the published range, metric by metric."""
+    ranges = ref.get("chapter_ranges") or ref.get("ranges") or {}
+    prints = [humanizer.fingerprint(c) for c in chapters]
+    rows = [f"\n{'metric':<18}{'novels p05':>11}{'p50':>8}{'p95':>8}{'drafts p50':>12}  verdict"]
+    for metric, r in ranges.items():
+        values = [fp[metric] for fp in prints if metric in fp]
+        if not values or "p50" not in r:
+            continue
+        mid = statistics.median(values)
+        verdict = ("below range" if mid < r["p05"] else "above range" if mid > r["p95"]
+                   else "low side" if mid < r["p25"] else "high side" if mid > r["p75"] else "typical")
+        rows.append(f"{metric:<18}{r['p05']:>11.2f}{r['p50']:>8.2f}{r['p95']:>8.2f}{mid:>12.2f}  {verdict}")
+    return "\n".join(rows)
+
+
+def overused(draft_text: str, corpus_text: str, sizes=(3, 4, 5), min_count: int = 8,
+             top: int = 40) -> list[tuple[str, int, float]]:
+    """Word sequences the drafts use far more often than published novels.
+
+    The Antislop method (Paech et al., ICLR 2026): rank n-grams by their rate in
+    generated text over their rate in human text. Candidates for LLM_TELLS; a
+    character name or a book's own refrain will show up too, so read the list.
+    """
+    import collections
+    words = lambda text: re.findall(r"[a-z']+", text.lower().replace("’", "'"))
+    draft, human = words(draft_text), words(corpus_text)
+    # A book's own names are always "overused"; drop words it capitalizes mid-sentence.
+    capital = collections.Counter(w.lower() for w in re.findall(r"(?<=[a-z,] )[A-Z][a-z]+", draft_text))
+    lower = collections.Counter(re.findall(r"\b[a-z]+\b", draft_text))
+    names = {w for w, n in capital.items() if n > lower[w]}
+    out = []
+    for n in sizes:
+        mine = collections.Counter(" ".join(draft[i:i + n]) for i in range(len(draft) - n + 1))
+        theirs = collections.Counter(" ".join(human[i:i + n]) for i in range(len(human) - n + 1))
+        for gram, count in mine.items():
+            if count < min_count or names.intersection(gram.split()):
+                continue
+            # Add-one smoothing: a sequence novelists never write is capped, not infinite.
+            ratio = (count / len(draft)) / ((theirs[gram] + 1) / len(human))
+            out.append((gram, count, round(ratio, 1)))
+    out.sort(key=lambda row: -row[2])
+    kept: list[tuple[str, int, float]] = []
+    for row in out:                      # drop shorter views of a longer listed phrase
+        if not any(row[0] in k[0] or k[0] in row[0] for k in kept):
+            kept.append(row)
+        if len(kept) >= top:
+            break
+    return kept
+
+
+def tells() -> None:
+    corpus = " ".join(p.read_text(encoding="utf-8", errors="replace") for p in CORPUS.glob("*.txt"))
+    drafts = " ".join(p.read_text(encoding="utf-8", errors="replace")
+                      for p in GENERATED.glob("chapter_*.txt") if re.fullmatch(r"chapter_\d+", p.stem))
+    if not corpus or not drafts:
+        raise SystemExit("need cached corpus text and generated chapters")
+    print(f"{'phrase':<40} {'count':>6} {'x novels':>9}")
+    for gram, count, ratio in overused(drafts, corpus):
+        print(f"{gram:<40} {count:>6} {ratio:>9}")
 
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--books", type=int, default=40)
     ap.add_argument("--bench", action="store_true", help="score novels vs generated chapters")
+    ap.add_argument("--tells", action="store_true", help="list phrases drafts overuse vs novels")
     args = ap.parse_args()
-    bench(args.books) if args.bench else build(args.books)
+    tells() if args.tells else bench(args.books) if args.bench else build(args.books)

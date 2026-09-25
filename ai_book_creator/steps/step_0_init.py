@@ -77,6 +77,13 @@ class InitStep(BaseStep):
         creative_lens = creative_lens or random.choice(CREATIVE_LENSES)
         
         # 1. Scope
+        if scope_type is None and self._is_auto() and not os.getenv("AI_BOOK_SERIES_COUNT"):
+            # The AI decides standalone vs series together with the idea.
+            book_idea = book_idea or self._get_concept(None)
+            match = re.search(r"(?im)^\W*books\W*:\W*(\d+)", book_idea)
+            series_book_count = min(6, max(1, int(match.group(1)))) if match else 1
+            scope_type = "series" if series_book_count > 1 else "single"
+            is_series = series_book_count > 1
         if scope_type is None:
             scope_type, series_book_count = self._get_scope()
             is_series = scope_type == "series"
@@ -204,28 +211,51 @@ class InitStep(BaseStep):
                 pass
             print("Enter a valid number greater than 1.")
     
-    def _get_concept(self, is_series: bool) -> str:
+    def _get_concept(self, is_series: bool | None) -> str:
+        """``is_series=None`` (auto mode) lets the pitch decide: standalone or series."""
+        if self._is_auto() and os.getenv("AI_BOOK_IDEA", "").strip():
+            # The user's own idea for this project: develop it, never replace it.
+            books_rule = (" End with a line 'Books: N': 1 for a standalone, or the series length "
+                          "(2-5) if the idea asks for or truly supports a series."
+                          if is_series is None else "")
+            return self.ai_service.generate_content(
+                "Act as a demanding commissioning editor. Develop the author's idea below into one "
+                "self-contained book concept with a working title, genre, premise, protagonist, "
+                "central conflict, and ending direction. Keep everything the author specified; fill "
+                "the gaps with the least generic choices that serve it." + books_rule +
+                f"\n\nAUTHOR'S IDEA:\n{os.environ['AI_BOOK_IDEA'].strip()}",
+                max_completion_tokens=1000).strip()
         if self._is_auto():
-            idea_kind = "series ideas" if is_series else "standalone book ideas"
+            idea_kind = ("ideas, each either a standalone novel or a series of 2-5 books, "
+                         "whichever its story engine truly supports" if is_series is None
+                         else "series ideas" if is_series else "standalone book ideas")
             inspiration = self.ai_service.generate_content(
                 f"Pitch 7 genuinely distinct {idea_kind}. Cross genres, settings, character types, "
                 "sources of conflict, narrative shapes, and emotional tones. Avoid retellings, stock "
                 "chosen-one plots, generic titles, and premises that differ only cosmetically. For each "
-                "give a title, genre, 2-3 sentence premise, story engine, and central character dilemma.",
+                "give a title, genre, 2-3 sentence premise, story engine, and central character dilemma. "
+                "After each pitch give 'Typicality: N%', how often a typical novelist handed this genre "
+                "would write it; include at least three below 15%.",
                 max_completion_tokens=2200,
             )
+            books_rule = (" End with a line 'Books: N': 1 for a standalone, or the series length."
+                          if is_series is None else "")
             prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     "Act as a demanding commissioning editor. Select the one pitch with the strongest "
                     "combination of originality, sustained story engine, emotional pressure, and a clear "
-                    "reader promise. Improve its weak spots. Return only one self-contained book concept "
-                    "with a working title, genre, premise, protagonist, central conflict, and ending direction."
+                    "reader promise; prefer a low Typicality. Improve its weak spots. Return only one "
+                    "self-contained book concept with a working title, genre, premise, protagonist, "
+                    "central conflict, and ending direction." + books_rule
                 ),
                 sections=[("Candidate pitches", inspiration)],
                 max_prompt_tokens=3500,
             )
             return self.ai_service.generate_content(prompt, max_completion_tokens=1000).strip()
 
+        if os.getenv("AI_BOOK_IDEA", "").strip():
+            # Given on the command line: the same as typing it at the prompt below.
+            return os.environ["AI_BOOK_IDEA"].strip()
         choice = input("\n1. Provide book idea\n2. Get AI inspiration\n\nChoice (1/2): ").strip()
         if choice == "2":
             print("\n🎨 AI Book Ideas:")
@@ -370,7 +400,9 @@ class InitStep(BaseStep):
                 "Generate 4 structurally distinct plot directions for this specific book. Vary the "
                 "protagonist's strategy, source of pressure, revelation pattern, cost of success, climax, "
                 "and ending flavor—not just surface details. Reject the first obvious solution to the premise. "
-                "Number them Option 1 through Option 4."
+                "Number them Option 1 through Option 4. After each, give 'Typicality: N%', your "
+                "estimate of how often a typical novelist handed this premise would write that "
+                "direction; include at least two below 15%."
             ),
             sections=sections,
             max_prompt_tokens=2500,
@@ -385,7 +417,7 @@ class InitStep(BaseStep):
             selection_prompt = self.ai_service.build_sectioned_prompt(
                 instruction=(
                     "Choose the plot direction that is least interchangeable with a generic genre novel "
-                    "while still supporting a full book. Strengthen causality and escalation, then return "
+                    "while still supporting a full book; prefer a low Typicality estimate. Strengthen causality and escalation, then return "
                     "only the selected, revised plot direction."
                 ),
                 sections=[("Book idea", book_idea), ("Plot options", options_text)],
