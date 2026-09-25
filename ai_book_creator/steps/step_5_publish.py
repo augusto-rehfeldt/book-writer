@@ -11,6 +11,7 @@ from typing import Any, Dict
 
 from .base_step import BaseStep
 from ..utils.cover_creator import create_cover
+from ..utils.ebook_exporter import load_provider_info, text_ai_tools
 from ..utils.perchance_creator import generate_perchance_background
 
 
@@ -74,7 +75,7 @@ class PublishStep(BaseStep):
                 "translations": "None",
             },
             "ai_tools": {
-                "text": os.getenv("AI_BOOK_TEXT_AI_TOOL") or self._text_ai_tool(),
+                "text": os.getenv("AI_BOOK_TEXT_AI_TOOL") or "; ".join(text_ai_tools(load_provider_info(self.output_dir))),
                 "images": os.getenv("AI_BOOK_IMAGE_AI_TOOL") or self._image_ai_tool(),
             },
             "publishing_rights": "I own the copyright and hold the necessary publishing rights.",
@@ -243,12 +244,6 @@ class PublishStep(BaseStep):
 Amazon KDP does not provide a supported public book-upload API. This final
 account action can be completed with --publish-kdp, or reviewed manually here.
 """
-
-    def _text_ai_tool(self) -> str:
-        provider = str(getattr(self.ai_service, "provider", "AI")).replace("-oauth", "")
-        model = str(getattr(self.ai_service, "writing_model", "")).strip()
-        labels = {"openai": "OpenAI", "google": "Google", "groq": "Groq", "minimax": "MiniMax"}
-        return " ".join(part for part in (labels.get(provider, provider.title()), model) if part)
 
     @staticmethod
     def _image_ai_tool() -> str:

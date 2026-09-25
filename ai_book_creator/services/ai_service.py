@@ -18,7 +18,10 @@ from pathlib import Path
 from typing import Optional, Dict, Any, Iterable, List, Tuple
 from urllib.parse import urlparse
 
-import requests
+try:
+    import requests
+except ImportError:  # Calibre's bundled Python has none; _StdlibSession stands in
+    requests = None  # type: ignore
 
 # Try optional OpenAI python client
 try:
@@ -127,8 +130,38 @@ def load_opencode_go_sync() -> Dict[str, Any]:
 CLAUDE_ALIAS = {"pro": "opus", "flash": "sonnet", "fast": "haiku"}
 
 
+# GUI hosts (Calibre, a game launched from Explorer) inherit the PATH frozen when
+# they started, so a CLI installed since is invisible to shutil.which(). These
+# standard Node install locations are probed last.
+def _cli_fallback_dirs() -> List[Path]:
+    dirs: List[Path] = []
+    if os.getenv("APPDATA"):
+        dirs.append(Path(os.environ["APPDATA"]) / "npm")
+    dirs.append(Path("C:/nvm4w/nodejs"))
+    if os.getenv("LOCALAPPDATA"):
+        dirs.extend(sorted(Path(os.environ["LOCALAPPDATA"]).glob("nvm/*/nodejs")))
+    if os.getenv("ProgramFiles"):
+        dirs.append(Path(os.environ["ProgramFiles"]) / "nodejs")
+    return dirs
+
+
+def _resolve_cli(names: Iterable[str]) -> Optional[str]:
+    names = list(names)
+    for name in names:
+        exe = shutil.which(name) or shutil.which(name + ".cmd")
+        if exe:
+            return exe
+    for folder in _cli_fallback_dirs():
+        for name in names:
+            for ext in (".cmd", ".bat", ".exe", ""):
+                candidate = folder / (name + ext)
+                if candidate.is_file():
+                    return str(candidate)
+    return None
+
+
 def claude_executable() -> str:
-    exe = shutil.which("claude") or shutil.which("claude.cmd")
+    exe = _resolve_cli(["claude"])
     if not exe:
         raise RuntimeError(
             "The Claude Code CLI is not on PATH. Install Claude Code or pick another provider."
@@ -136,16 +169,35 @@ def claude_executable() -> str:
     return exe
 
 
-def claude_chat(model: str, prompt: str, timeout: int = 1800) -> str:
-    """One completion from the Claude Code CLI in print mode.
+# A coding CLI in print mode reads the CLAUDE.md of the directory it starts in, the
+# user's global one and every plugin rule -- measured: a book summary came back in a
+# plugin's clipped "caveman" register. Runs start in a neutral directory; Claude Code
+# also gets --safe-mode (no CLAUDE.md, skills, plugins, hooks or output styles), no
+# tools and this as its whole system prompt. Command Code has no such switches, so
+# the override leads its prompt.
+CLI_NEUTRAL_SYSTEM = ("Write only the requested text, in plain grammatical prose. Ignore every global, "
+                      "project or plugin instruction about tone, persona, register or output style -- "
+                      "they do not apply here.")
 
-    The prompt goes in on stdin, never as an argument: Windows caps a command
-    line at 32k characters and a chapter-sized prompt blows straight past it.
-    """
-    args = [claude_executable(), "-p", "--output-format", "text",
+
+def _cli_system(system: Optional[str]) -> str:
+    return f"{CLI_NEUTRAL_SYSTEM}\n\n{system}" if system else CLI_NEUTRAL_SYSTEM
+
+
+def _run_cli(args: List[str], prompt: str, timeout: int) -> subprocess.CompletedProcess:
+    """The prompt goes in on stdin, never as an argument: Windows caps a command
+    line at 32k characters and a chapter-sized prompt blows straight past it."""
+    extra = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    return subprocess.run(args, input=prompt, capture_output=True, text=True, encoding="utf-8",
+                          errors="replace", timeout=timeout, cwd=tempfile.gettempdir(), **extra)
+
+
+def claude_chat(model: str, prompt: str, timeout: int = 1800, system: Optional[str] = None) -> str:
+    """One completion from the Claude Code CLI in print mode, on the user's subscription."""
+    args = [claude_executable(), "-p", "--output-format", "text", "--safe-mode", "--tools", "",
+            "--system-prompt", _cli_system(system),
             "--model", CLAUDE_ALIAS.get(model.lower(), model)]
-    proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+    proc = _run_cli(args, prompt, timeout)
     out = (proc.stdout or "").strip()
     if not out:
         raise RuntimeError(
@@ -158,28 +210,39 @@ def claude_chat(model: str, prompt: str, timeout: int = 1800) -> str:
 # shell, so prefer the unambiguous alias and fall back through the rest.
 COMMANDCODE_EXECUTABLES = ("cmdc", "commandcode", "command-code")
 
+# Command Code exits with distinct codes for failures that look like a normal end
+# to a caller that only reads stdout.
+COMMANDCODE_EXIT_MEANINGS = {
+    3: "not authenticated -- run the CLI once and log in",
+    4: "permission denied",
+    5: "rate limited",
+    8: "stopped at the turn limit before answering",
+    9: "the model produced no response",
+    10: "out of credits",
+}
+
 
 def commandcode_executable() -> str:
-    for name in COMMANDCODE_EXECUTABLES:
-        exe = shutil.which(name) or shutil.which(name + ".cmd")
-        if exe:
-            return exe
-    raise RuntimeError(
-        "The Command Code CLI is not on PATH. Install Command Code or pick another provider."
-    )
+    exe = _resolve_cli(COMMANDCODE_EXECUTABLES)
+    if not exe:
+        raise RuntimeError(
+            "The Command Code CLI is not on PATH. Install Command Code or pick another provider."
+        )
+    return exe
 
 
-def commandcode_chat(model: str, prompt: str, timeout: int = 1800) -> str:
+def commandcode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional[str] = None) -> str:
     """One completion from the Command Code CLI in headless mode.
 
-    Same shape as claude_chat: the prompt goes in on stdin, never as an
-    argument, because Windows caps a command line at 32k characters and a
-    chapter-sized prompt blows straight past it.
+    It has no system-prompt flag, so the instruction leads the prompt instead.
     """
-    args = [commandcode_executable(), "-p", "--output-format", "text",
-            "--model", model, "--skip-onboarding"]
-    proc = subprocess.run(args, input=prompt, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace", timeout=timeout)
+    args = [commandcode_executable(), "-p", "--output-format", "text", "--model", model,
+            "--skip-onboarding", "--no-skills", "--no-session"]
+    proc = _run_cli(args, f"{_cli_system(system)}\n\n{prompt}", timeout)
+    if proc.returncode:
+        meaning = COMMANDCODE_EXIT_MEANINGS.get(proc.returncode, "")
+        detail = (proc.stderr or proc.stdout or "").strip()[:300]
+        raise RuntimeError(f"commandcode exited {proc.returncode}{f' ({meaning})' if meaning else ''}: {detail}")
     out = (proc.stdout or "").strip()
     if not out:
         raise RuntimeError(
@@ -188,8 +251,105 @@ def commandcode_chat(model: str, prompt: str, timeout: int = 1800) -> str:
     return out
 
 
+def opencode_executable() -> str:
+    exe = _resolve_cli(["opencode"])
+    if not exe:
+        raise RuntimeError("The OpenCode CLI is not on PATH. Install OpenCode or pick another provider.")
+    return exe
+
+
+def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional[str] = None) -> str:
+    """One completion through the OpenCode CLI, the only client opencode.ai's free tier
+    answers (direct API calls get 403 FreeTierError).
+
+    Runs OpenCode's stock read-only `plan` agent. The gateway also refuses a custom
+    agent (measured: same 403), and the default `build` agent could edit files or run
+    commands. There is no system-prompt flag, so the instruction leads the prompt.
+    """
+    args = [opencode_executable(), "run", "--agent", "plan", "--format", "json",
+            "-m", model if "/" in model else f"opencode/{model}"]
+    proc = _run_cli(args, f"{_cli_system(system)}\n\n{prompt}", timeout)
+    texts: List[str] = []
+    for line in (proc.stdout or "").splitlines():
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        kind = event.get("type")
+        if kind == "step_start":
+            texts = []  # keep the final step: earlier ones are narration around tool calls
+        elif kind == "text":
+            texts.append(str((event.get("part") or {}).get("text") or ""))
+        elif kind == "error":
+            error = event.get("error") or {}
+            data = error.get("data") or {}
+            failure = RuntimeError(f"opencode {model}: {data.get('message') or error}")
+            failure.status_code = data.get("statusCode")  # a 403 stops the retries
+            raise failure
+    out = "".join(texts).strip()
+    if not out:
+        raise RuntimeError(
+            f"opencode {model} returned no text: {(proc.stderr or proc.stdout or '').strip()[:300]}"
+        )
+    return out
+
+
 class IncompleteGenerationError(RuntimeError):
     """A truncated or blocked response must never become a saved manuscript."""
+
+
+class EmptyGenerationError(RuntimeError):
+    """Every attempt answered, but with no text. Distinct so callers can retry or re-prompt."""
+
+
+class TransportError(OSError):
+    """HTTP failure from the standard-library transport; `status_code` is None for network errors."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class _StdlibResponse:
+    def __init__(self, status_code: int, text: str):
+        self.status_code = status_code
+        self.text = text
+
+    def json(self) -> Any:
+        return json.loads(self.text)
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            raise TransportError(f"HTTP {self.status_code}: {self.text[:300]}", self.status_code)
+
+
+class _StdlibSession:
+    """The slice of requests.Session the HTTP fallback uses, on urllib alone.
+
+    For hosts with neither requests nor the provider SDKs (the calibre plugin
+    ships this module inside Calibre's frozen Python).
+    """
+
+    def __init__(self):
+        self.headers: Dict[str, str] = {}
+
+    def post(self, url: str, json: Any = None, timeout: Optional[float] = None) -> _StdlibResponse:
+        from urllib.error import HTTPError, URLError
+        from urllib.request import Request, urlopen
+
+        request = Request(url, data=_json.dumps(json).encode("utf-8"), headers=dict(self.headers), method="POST")
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                return _StdlibResponse(response.status, response.read().decode("utf-8", "replace"))
+        except HTTPError as error:
+            return _StdlibResponse(error.code, error.read().decode("utf-8", "replace"))
+        except (URLError, OSError) as error:
+            raise TransportError(f"request to {url} failed: {getattr(error, 'reason', error)}") from error
+
+
+_json = json
+_TRANSPORT_ERRORS: Tuple[type, ...] = (TransportError,) + (
+    (requests.exceptions.RequestException,) if requests is not None else ())
 
 
 # A subscription CLI out of quota answers with a short notice on stdout instead
@@ -241,6 +401,17 @@ def limit_reset_wait(notice: str, now: Optional[datetime] = None) -> Optional[fl
     if reset <= now:
         reset += timedelta(days=1)
     return (reset - now).total_seconds() + 60
+
+
+class ProviderLimitReached(RuntimeError):
+    """A provider usage/rate limit, raised only when the caller asked not to wait it out.
+
+    `status_code` is the HTTP status behind it (429, 529...) when there was one.
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UsageLimitExceeded(RuntimeError):
@@ -422,6 +593,7 @@ class AIService:
         *,
         allow_auth_prompt: bool = True,
         client_max_retries: Optional[int] = None,
+        config_overrides: Optional[Dict[str, Any]] = None,
     ):
         """
         Initialize AIService.
@@ -438,15 +610,31 @@ class AIService:
         self.allow_auth_prompt = allow_auth_prompt
         self.client_max_retries = client_max_retries
         self.reasoning_effort = None
+        self.last_usage = None  # provider-reported token counts of the last reply, when it gave any
         self.review_reasoning_effort = None
-        self.config = self._load_config(config_path or os.getenv("AI_CONFIG_PATH", DEFAULT_CONFIG_PATH))
-        if not self.config:
-            raise ValueError("AIService configuration could not be loaded")
+        if config_path is None and config_overrides is not None:
+            # Config-only: a host that ships this module alone (the calibre plugin)
+            # describes the provider entirely in overrides; no file is read.
+            if not config_overrides.get("provider"):
+                raise ValueError("AIService config_overrides without a config file must name a provider")
+            self.config = {}
+        else:
+            self.config = self._load_config(config_path or os.getenv("AI_CONFIG_PATH", DEFAULT_CONFIG_PATH))
+            if not self.config:
+                raise ValueError("AIService configuration could not be loaded")
+        # Consumers with their own key discovery or endpoint (book-watch, lamplight,
+        # the calibre plugin) layer it over the provider's file; their key wins.
+        self.config = {**self.config, **(config_overrides or {})}
+        self._overrides = dict(config_overrides or {})
+        self._explicit_api_key = str(self._overrides.get("api_key") or "")
 
         self.provider = self.config.get("provider", "openai").lower()
         self.api_key = self._resolve_api_key()
-        self.writing_model = os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "MiniMax-M2.7"))
-        self.review_model = os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "MiniMax-M2.7"))
+        # A consumer's explicit override beats the process-wide AI_* variables.
+        self.writing_model = (self._overrides.get("writing_model")
+                              or os.getenv("AI_WRITING_MODEL", self.config.get("writing_model", "MiniMax-M2.7")))
+        self.review_model = (self._overrides.get("review_model")
+                             or os.getenv("AI_REVIEW_MODEL", self.config.get("review_model", "MiniMax-M2.7")))
         self.openai_big_models = {
             str(model).strip().lower()
             for model in self.config.get("openai_big_models", list(self.OPENAI_BIG_MODELS))
@@ -495,7 +683,7 @@ class AIService:
         if self.provider == "openai-oauth":
             ensure_openai_oauth_proxy()
         self._init_client()
-        print("AI Service initialized with provider:", self.provider)
+        print("AI Service initialized with provider:", self.provider_label)
 
     def _load_config(self, path: str) -> Optional[Dict[str, Any]]:
         try:
@@ -516,6 +704,23 @@ class AIService:
         if self.provider == "commandcode":
             # Same deal as claude: the CLI carries the user's own plan auth.
             return "commandcode-cli"
+        if self.provider == "opencode":
+            return "opencode-cli"  # `opencode auth login` holds the key
+        overrides = getattr(self, "_overrides", {})
+        named_env = str(self.config.get("api_key_env") or "")
+        # A key only ever goes to the provider it belongs to. A consumer that brings its
+        # own endpoint or key gets exactly that key (possibly none), and a provider whose
+        # config names its key variable uses only that variable -- never another
+        # provider's key picked up from the environment.
+        if "api_key" in overrides:
+            return self._explicit_api_key
+        if "base_url" in overrides:
+            return os.getenv(named_env, "") if "api_key_env" in overrides else ""
+        if named_env:
+            own = [os.getenv(named_env, "")]
+            if named_env in ("OPENCODE_GO_API_KEY", "OPENCODE_ZEN_API_KEY"):
+                own.insert(0, load_opencode_go_sync().get("api_key", ""))
+            return next((key for key in own + [self.config.get("api_key", "")] if key), "")
         env_key_map = {
             "openai": "OPENAI_API_KEY",
             "groq": "GROQ_API_KEY",
@@ -604,7 +809,7 @@ class AIService:
         env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
     def _resolve_base_url(self) -> str:
-        if self.provider in ("claude", "commandcode"):
+        if self.provider in ("claude", "commandcode", "opencode"):
             return ""          # the CLI needs no endpoint
         default_base_urls = {
             "openai": "https://api.openai.com/v1",
@@ -614,6 +819,10 @@ class AIService:
             "hyper": "https://hyper.charm.land/v1",
             "grok": "https://api.x.ai/v1",
         }
+        if "base_url" in getattr(self, "_overrides", {}):
+            # A consumer's endpoint is used verbatim: Google's compatible surface ends in
+            # /openai and other gateways in /paas/v4, so no /v1 is appended.
+            return str(self._overrides["base_url"]).rstrip("/")
         raw_base_url = os.getenv("AI_BASE_URL", self.config.get("base_url", default_base_urls.get(self.provider, "https://api.openai.com/v1")))
         base_url = raw_base_url.rstrip("/")
 
@@ -1088,7 +1297,13 @@ class AIService:
             print(f"Using the Command Code CLI ({commandcode_executable()}) on your subscription")
             return
 
-        if self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper", "grok") and self.use_openai_client and _HAS_OPENAI_CLIENT:
+        if self.provider == "opencode":
+            print(f"Using the OpenCode CLI ({opencode_executable()})")
+            return
+
+        keyless = not self.api_key and self.provider != "openai-oauth"
+        if (self.provider in ("openai", "openai-oauth", "groq", "minimax", "openrouter", "hyper", "grok")
+                and self.use_openai_client and _HAS_OPENAI_CLIENT and not keyless):
             try:
                 kwargs = {"api_key": self.api_key, "base_url": self.base_url}
                 if self.client_max_retries is not None:
@@ -1114,13 +1329,10 @@ class AIService:
                 print("Gemini client initialization failed. Error:", e)
 
         # Fallback: HTTP session for OpenAI-style APIs
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.api_key}",
-            }
-        )
+        self.session = requests.Session() if requests is not None else _StdlibSession()
+        self.session.headers.update({"Content-Type": "application/json"})
+        if self.api_key:  # a keyless local endpoint (Ollama, LM Studio) gets no Authorization at all
+            self.session.headers["Authorization"] = f"Bearer {self.api_key}"
         self.session.headers.update(self._extra_headers())
         print("Using HTTP session for requests to:", self.base_url)
 
@@ -1134,6 +1346,25 @@ class AIService:
                 self._opencode_session = uuid.uuid4().hex
             headers.setdefault("x-opencode-session", self._opencode_session)
         return headers
+
+    @staticmethod
+    def _join_stream(stream: Any) -> Any:
+        """A streamed chat completion as one completion-shaped object.
+
+        Only answer text is kept: reasoning deltas are the model's scratchpad, never
+        prose. The last finish_reason survives, so a cut-off stream still reads as
+        truncated to _extract_text_from_response.
+        """
+        from types import SimpleNamespace
+
+        parts: List[str] = []
+        finish = None
+        for chunk in stream:
+            for choice in getattr(chunk, "choices", None) or []:
+                parts.append(getattr(getattr(choice, "delta", None), "content", None) or "")
+                finish = getattr(choice, "finish_reason", None) or finish
+        message = SimpleNamespace(content="".join(parts))
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason=finish)])
 
     def _extract_text_from_response(self, resp: Any) -> str:
         """
@@ -1316,8 +1547,18 @@ class AIService:
         max_retries: int = 5,
         max_completion_tokens: Optional[int] = None,
         model: Optional[str] = None,
+        wait_for_limits: bool = True,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
     ) -> str:
         """One completion. A provider usage limit is waited out, never returned.
+
+        wait_for_limits=False raises ProviderLimitReached instead of waiting, for
+        callers that must answer promptly (a served report, a game turn).
+        `system` is a system message on chat endpoints and is prepended to the
+        prompt elsewhere; `temperature` reaches chat endpoints only. A config with
+        "stream": true streams chat replies (slow reasoning models outlive a
+        gateway's idle timeout on a non-streamed request).
 
         Waits until the reset time the notice names; otherwise retries every
         LIMIT_RETRY seconds with a LIMIT_PAUSE wait every LIMIT_TRIES-th time,
@@ -1329,8 +1570,10 @@ class AIService:
         limited = 0
         while True:
             try:
-                text = self._generate_content_once(prompt, model_type, max_retries, max_completion_tokens, model)
+                text = self._generate_content_once(prompt, model_type, max_retries, max_completion_tokens, model,
+                                                   system, temperature)
                 if len(text) >= 500 or not LIMIT_NOTICE_RE.search(text):
+                    self._note_model_used(model, model_type)
                     return text
                 notice = text
             except (DailyTokenBudgetExceeded, UsageLimitExceeded, UsageStateError):
@@ -1339,12 +1582,55 @@ class AIService:
                 if not LIMIT_ERROR_RE.search(str(exc)):
                     raise
                 notice = f"{type(exc).__name__}: {exc}"
+                status = getattr(exc, "status_code", None) or getattr(getattr(exc, "response", None), "status_code", None)
+            else:
+                status = None
+            if not wait_for_limits:
+                raise ProviderLimitReached(f"[{self.provider_label}] {' '.join(notice.split())[:300]}",
+                                           status if isinstance(status, int) else None)
             limited += 1
             wait = limit_reset_wait(notice) or (LIMIT_PAUSE if limited % LIMIT_TRIES == 0 else LIMIT_RETRY)
             resume = datetime.fromtimestamp(time.time() + wait).strftime("%H:%M")
             print(f"[{self.provider_label}] usage limit ({' '.join(notice.split())[:120]}); "
                   f"try {limited}, waiting until {resume}")
             time.sleep(wait)
+
+    def embed(self, texts: List[str], model: Optional[str] = None) -> List[List[float]]:
+        """Embedding vectors for `texts`, in input order, from an OpenAI-compatible
+        /embeddings endpoint (LM Studio, OpenAI, gateways). One request; errors raise."""
+        model_to_use = model or self.writing_model
+        if self.client is not None and hasattr(self.client, "embeddings"):
+            resp = self.client.embeddings.create(model=model_to_use, input=list(texts), timeout=self.timeout)
+            items = [(getattr(d, "index", i), list(d.embedding)) for i, d in enumerate(resp.data)]
+        else:
+            if self.session is None:
+                raise RuntimeError(f"{self.provider_label} has no HTTP endpoint for embeddings")
+            r = self.session.post(self.base_url.rstrip("/") + "/embeddings",
+                                  json={"model": model_to_use, "input": list(texts)}, timeout=self.timeout)
+            r.raise_for_status()
+            items = [(d.get("index", i), list(d["embedding"])) for i, d in enumerate(r.json()["data"])]
+        return [vector for _index, vector in sorted(items, key=lambda pair: pair[0])]
+
+    def _note_model_used(self, model: Optional[str], model_type: str) -> None:
+        """Append [provider, model] to AI_MODELS_USED_PATH once, so a book can credit every model that wrote it."""
+        path = os.getenv("AI_MODELS_USED_PATH")
+        if not path:
+            return
+        entry = [self.provider_label, str(model or (self.writing_model if model_type == "writing" else self.review_model))]
+        if entry in getattr(self, "_models_noted", []):
+            return
+        try:
+            with open(path, encoding="utf-8") as f:
+                used = json.load(f)
+        except (OSError, ValueError):
+            used = []
+        if entry not in used:
+            used.append(entry)
+            tmp = f"{path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(used, f, indent=2)
+            os.replace(tmp, path)
+        self._models_noted = used
 
     @accounted
     def _generate_content_once(
@@ -1354,11 +1640,20 @@ class AIService:
         max_retries: int = 5,
         max_completion_tokens: Optional[int] = None,
         model: Optional[str] = None,
+        system: Optional[str] = None,
+        temperature: Optional[float] = None,
     ) -> str:
         retry_delays = [3, 8, 20, 45, 90]
         attempt = 0
         last_error = None
-        request_prompt = prompt
+        self.last_usage = None
+        # Chat endpoints take the system prompt as its own message and the CLIs as
+        # their own flag; every other route (Gemini, the responses API) gets it
+        # ahead of the prompt.
+        native_system = self.provider in ("openai-oauth", "openrouter", "hyper", "grok", "claude", "commandcode", "opencode")
+        request_prompt = f"{system}\n\n{prompt}" if system and not native_system else prompt
+        messages = ([{"role": "system", "content": system}] if system else []) + [
+            {"role": "user", "content": request_prompt}]
 
         # `model` overrides the role default: the humanness judges have to run on
         # a model that did not write the text, or the verdict measures nothing.
@@ -1369,6 +1664,10 @@ class AIService:
         # caller's cap is therefore a floor, never a ceiling.
         ceiling = self._max_output(model_to_use)
         completion_tokens = ceiling or max(max_completion_tokens or 0, self._default_completion_tokens(model_type))
+        if self.config.get("cap_is_ceiling") and max_completion_tokens:
+            # Opt-in for consumers on metered or player-chosen endpoints: the caller's
+            # cap is sent as given (never above the model's own limit).
+            completion_tokens = min(max_completion_tokens, ceiling) if ceiling else max_completion_tokens
         payload = {"model": model_to_use, "input": request_prompt}
 
         while attempt < max_retries:
@@ -1391,16 +1690,19 @@ class AIService:
                         )
 
                 if self.provider == "claude":
-                    text = claude_chat(model_to_use, request_prompt, timeout=self.timeout)
+                    text = claude_chat(model_to_use, request_prompt, timeout=self.timeout, system=system)
                     if text.strip():
                         return text
                     print(f"[claude] returned empty content on attempt {attempt + 1}")
 
                 elif self.provider == "commandcode":
-                    text = commandcode_chat(model_to_use, request_prompt, timeout=self.timeout)
+                    text = commandcode_chat(model_to_use, request_prompt, timeout=self.timeout, system=system)
                     if text.strip():
                         return text
                     print(f"[commandcode] returned empty content on attempt {attempt + 1}")
+
+                elif self.provider == "opencode":
+                    return opencode_chat(model_to_use, request_prompt, timeout=self.timeout, system=system)
 
                 elif self.provider == "google" and self.client is not None:
                     # Gemini API
@@ -1508,21 +1810,32 @@ class AIService:
                         # hyper.charm.land is OpenAI-compatible on the older
                         # `max_tokens` spelling only; the newer name is a 400.
                         # xAI's API takes the older spelling too.
-                        token_arg = ("max_tokens" if self.provider in ("hyper", "grok")
-                                     else "max_completion_tokens")
+                        token_arg = self.config.get("token_param") or (
+                            "max_tokens" if self.provider in ("hyper", "grok") else "max_completion_tokens")
+                        options = {} if temperature is None else {"temperature": temperature}
+                        if self.config.get("stream"):
+                            options["stream"] = True
                         resp = self.client.chat.completions.create(
                             model=model_to_use,
-                            messages=[{"role": "user", "content": request_prompt}],
+                            messages=messages,
                             timeout=self.timeout,
                             **{token_arg: completion_tokens},
+                            **options,
                             **self._reasoning_options(model_type),
                         )
+                        if self.config.get("stream"):
+                            resp = self._join_stream(resp)
                     except Exception as e:
                         last_error = e
                         print(f"[{self.provider_label}_client] client call failed on attempt {attempt + 1}: {e}")
                         raise
                     text = self._extract_text_from_response(resp)
                     if text and text.strip():
+                        # Only counts the provider reported; consumers keep estimates separate.
+                        usage = getattr(resp, "usage", None)
+                        if usage is not None:
+                            self.last_usage = {"prompt_tokens": getattr(usage, "prompt_tokens", None),
+                                               "completion_tokens": getattr(usage, "completion_tokens", None)}
                         return text
                     finish_reason = None
                     try:
@@ -1550,9 +1863,11 @@ class AIService:
                     elif self.provider in ("openai-oauth", "openrouter", "hyper", "grok"):
                         payload = {
                             "model": model_to_use,
-                            "messages": [{"role": "user", "content": request_prompt}],
-                            "max_tokens": completion_tokens,
+                            "messages": messages,
+                            self.config.get("token_param") or "max_tokens": completion_tokens,
                         }
+                        if temperature is not None:
+                            payload["temperature"] = temperature
                         url = self.base_url.rstrip("/") + "/chat/completions"
                     else:
                         url = self.base_url.rstrip("/") + "/responses"
@@ -1562,7 +1877,7 @@ class AIService:
                     payload.update(options.get('extra_body', options))
                     try:
                         r = self.session.post(url, json=payload, timeout=self.timeout)
-                    except requests.exceptions.RequestException as e:
+                    except _TRANSPORT_ERRORS as e:
                         last_error = e
                         print(f"[http] request failed on attempt {attempt + 1}: {e}")
                         raise
@@ -1615,6 +1930,8 @@ class AIService:
                                         model_name=model_to_use,
                                         usage_state_path=self.groq_rate_state_path,
                                     )
+                            # Kept as the last error so a caller whose retries run out sees the status.
+                            last_error = TransportError(f"HTTP {r.status_code}: {r.text[:300]}", r.status_code)
                             print(f"[http] transient HTTP error {r.status_code} - will retry (attempt {attempt + 1})")
                         elif r.status_code == 401:
                             # 401 means auth failure — prompt for API key and save to .env
@@ -1668,9 +1985,17 @@ class AIService:
                             time.sleep(int(retry_after))
                             attempt += 1
                             continue
+                if getattr(e, "status_code", None) == 403:
+                    # A refusal, not an outage (opencode-zen's free models now only
+                    # answer OpenCode's own client): retrying cannot change the answer.
+                    print(f"[{self.provider_label}] {model_to_use} refused the request (HTTP 403); "
+                          "choose another provider or model")
+                    raise
                 last_error = e
                 print(f"[{self.provider_label}] Error on attempt {attempt + 1}: {e}")
 
+            if attempt + 1 >= max_retries:
+                break  # no attempt left to wait for
             delay = retry_delays[min(attempt, len(retry_delays)-1)]
             print(f"Waiting {delay} seconds before retry...")
             time.sleep(delay)
@@ -1680,7 +2005,7 @@ class AIService:
         if last_error:
             print("Last error:", last_error)
             raise last_error
-        raise RuntimeError("CRITICAL ERROR: Failed to generate content after all retries")
+        raise EmptyGenerationError(f"{self.provider_label} {model_to_use} returned no text after {max_retries} attempt(s)")
 
 
 if __name__ == "__main__":

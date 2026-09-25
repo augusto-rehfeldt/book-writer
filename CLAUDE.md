@@ -6,6 +6,10 @@ AI book generation pipeline: idea → structure → chapters → review → EPUB
 ## Non-Negotiables
 - Never log or commit API keys / OAuth credentials (`.env`, `~/.codex`).
 - Progress lives in project state on disk — resumable, don't restart from scratch.
+- Books are published under the pen name in `AI_BOOK_AUTHOR` ("Li Wen"), never the
+  user's real name. The EPUB disclaimer and KDP `ai_tools` credit every model in
+  `book_output/models_used.json`, which `AIService` appends to on each reply
+  (`AI_MODELS_USED_PATH`, set by `cli.main`; archived per series book).
 - **The humanness baseline is measured, not invented.** Every bound the scorer
   gates on is a percentile of real published fiction in
   `ai_book_creator/config/prose_baseline.json`. Change a number there only by
@@ -50,6 +54,11 @@ old, else live). Display only: the config's `max_output` is still the cap sent.
   the user's Command Code subscription, no key; catalogue model ids must be
   written lowercase (the model menu lowercases picks, and Command Code ids are
   case-sensitive).
+- `opencode-zen` — config provider `opencode`: the OpenCode CLI
+  (`opencode run --agent plan --format json -m opencode/ID`, prompt on stdin).
+  opencode.ai's free tier answers only OpenCode itself: direct API calls get
+  403 FreeTierError, and so does the CLI with a custom agent. The stock `plan`
+  agent is read-only; `build` could edit files. A 403 is never retried.
 - `hyper` — hyper.charm.land, OpenAI-compatible (`HYPER_API_KEY`). Send it
   `max_tokens`, not `max_completion_tokens`; the newer spelling is a 400.
 - `grok` — xAI's own API, OpenAI-compatible (`XAI_API_KEY`, `api.x.ai/v1`).
@@ -112,11 +121,29 @@ tests remain ignored.
 
 ## Shared service contract
 
-Music writer and mathforge are supported consumers. Expose options on AIService,
-not private-method or SDK monkeypatches. `allow_auth_prompt`, `client_max_retries`
-and `set_reasoning_effort(writing, review)` are public. Metered requests sharing a
+This AIService is the workspace's one AI suite. Consumers: music writer, mathforge,
+bandido, impostor, book-watch, lamplight, the calibre summarizer and Story Atlas (see
+the workspace README's contract section). Expose options on AIService, not
+private-method or SDK monkeypatches, and add them test-first in
+`tests/test_shared_consumers.py` / `tests/test_shared_portable.py`. Public:
+`allow_auth_prompt`, `client_max_retries`, `config_overrides` (merged over the file,
+explicit `api_key` wins; config-only when no file, then `provider` is required),
+`cli.provider_config_path`, `set_reasoning_effort(writing, review)`,
+`generate_content(system=, temperature=, wait_for_limits=)`, `embed()` and `last_usage`.
+Config keys `stream` and `token_param` are consumer-facing too.
+
+The module must import on the standard library alone: the calibre plugin packs this
+file into its zip and Calibre's Python has no `requests` or SDKs (`_StdlibSession`).
+The CLI transports (`claude_chat`, `commandcode_chat`) run from a neutral directory;
+Claude Code also gets `--safe-mode --tools "" --system-prompt CLI_NEUTRAL_SYSTEM`, because a
+CLI otherwise reads project/global CLAUDE.md and plugin rules into the reply. Keys never
+cross providers (`_resolve_api_key`): overrides with their own endpoint get only their own
+key, and a config naming `api_key_env` uses only that variable; the legacy cross-provider
+fallback remains only for configs that name none. Override `base_url`, `writing_model`
+and `review_model` beat the `AI_*` environment variables; `cap_is_ceiling` sends a
+caller's cap as given. Metered requests sharing a
 ledger serialize under an OS lock; atomic writes and UsageStateError prevent silent
-accounting resets/retries. Run the workspace checks for all three consumers together.
+accounting resets/retries. Run every consumer's workspace check together (command in the workspace AGENTS.md).
 
 `generate_content` never returns a provider's usage-limit notice (`LIMIT_NOTICE_RE`;
 the Claude Code CLI prints "You've hit your session limit" as its reply) and waits

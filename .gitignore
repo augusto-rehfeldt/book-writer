@@ -10,6 +10,7 @@ tests/*
 !tests/test_humanizer.py
 !tests/test_chapter_budget.py
 !tests/test_service_contract.py
+!tests/test_shared_*.py
 benchmarks/*
 !benchmarks/evaluate_prose.py
 !benchmarks/prose_cases.json

@@ -93,24 +93,31 @@ class WriteStep(BaseStep):
                 if not text.strip():
                     raise BrokenProjectStateError(f"Empty saved chapter: {existing_filename}")
                 context_hash = text_digest(memory)
+                changed = False
                 if (existing_chapter.get("source_hash") != text_digest(text)
                         or existing_chapter.get("context_hash") != context_hash
                         or not existing_chapter.get("continuity")):
+                    print("  Rebuilding continuity record (chapter text or earlier context changed)...")
                     existing_chapter["continuity"] = update_continuity(
                         self.ai_service, text, memory, chapter_data["title"])
                     existing_chapter["source_hash"] = text_digest(text)
                     existing_chapter["context_hash"] = context_hash
+                    changed = True
                 memory = existing_chapter["continuity"]
                 previous_ending = text[-2500:]
                 existing_chapter["word_count"] = calculate_word_count(text)
                 if self.glossary_manager and existing_chapter.get("glossary_hash") != text_digest(text):
+                    print("  Updating glossary from chapter...")
                     self.glossary_manager.auto_populate_from_chapter(text, chapter_data["title"], self.ai_service)
                     existing_chapter["glossary_hash"] = text_digest(text)
+                    changed = True
                 total_word_count += existing_chapter["word_count"]
-                self.save_step_data({"chapters": written_chapters, "total_word_count": total_word_count,
-                                     "total_pages": calculate_page_count(total_word_count, init_words_per_page),
-                                     "_partial": True})
-                self.project_manager.save_project()
+                # Nothing recomputed: the final save after the loop records the totals.
+                if changed:
+                    self.save_step_data({"chapters": written_chapters, "total_word_count": total_word_count,
+                                         "total_pages": calculate_page_count(total_word_count, init_words_per_page),
+                                         "_partial": True})
+                    self.project_manager.save_project()
                 continue
 
             print(f"\nWriting {chapter_data['title']} (First Draft)...")

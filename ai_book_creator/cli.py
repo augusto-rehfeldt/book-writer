@@ -17,6 +17,7 @@ from urllib.request import Request, urlopen
 
 # ponytail: load_local_env() runs once in ai_book_creator/__init__.py on import.
 from .core.book_creator import AIBookCreator
+from .env import exit_on_ctrl_c
 from .services.ai_service import ensure_openai_oauth_proxy, load_opencode_go_sync
 
 
@@ -36,9 +37,10 @@ PROVIDER_CONFIG_MAP = {
     "commandcode": str(PACKAGE_ROOT / "config" / "ai_config_commandcode.json"),
     "hyper": str(PACKAGE_ROOT / "config" / "ai_config_hyper.json"),
     "grok": str(PACKAGE_ROOT / "config" / "ai_config_grok.json"),
+    "nvidia": str(PACKAGE_ROOT / "config" / "ai_config_nvidia.json"),
 }
 # Providers whose model list lives in their config file and is picked at runtime.
-CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok")
+CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok", "nvidia")
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
@@ -64,6 +66,7 @@ MODELS_DEV_SOURCES = {
     "commandcode": ("anthropic", "openai", "google", "openrouter"),
     "hyper": ("hyper",),
     "grok": ("xai",),
+    "nvidia": ("nvidia",),
 }
 # Paid through a subscription, so the price shown is only the API list rate.
 SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth")
@@ -220,6 +223,7 @@ PROJECT_ARTIFACT_PATTERNS = (
     "book_glossary.txt",
     "checkpoint_*.json",
     "chapter_*.txt",
+    "models_used.json",
 )
 
 
@@ -302,10 +306,7 @@ def _save_last_provider(provider: str, openai_model: str | None = None,
 
 def _prompt_provider(default_provider: str) -> str:
     valid_providers = list(PROVIDER_CONFIG_MAP.keys())
-    prompt = (
-        f"Choose provider [default: {default_provider}] "
-        f"({', '.join(valid_providers)}): "
-    )
+    prompt = f"Choose provider ({', '.join(valid_providers)}) [default: {default_provider}]: "
 
     while True:
         try:
@@ -421,7 +422,7 @@ def _load_last_catalogue_model(provider: str, default_model: str | None = None,
 
 PROVIDER_LABELS = {
     "opencode-go": "OpenCode Go",
-    "opencode-zen": "OpenCode Zen free",
+    "opencode-zen": "OpenCode Zen (through the OpenCode CLI)",
     "claude": "Claude Code (your subscription, no API key)",
     "commandcode": "Command Code (your subscription, no API key)",
     "hyper": "hyper.charm.land",
@@ -586,6 +587,18 @@ def _prepare_fresh_start() -> None:
     _clear_project_output()
 
 
+def provider_config_path(provider: str) -> str:
+    """Config file AIService should load for a provider: the user's .local.json copy when present.
+
+    Consumers that choose the provider themselves (book-watch's report picker, lamplight's
+    wizard, the calibre plugin) call this instead of the interactive choose_ai menu.
+    """
+    provider = "openai-oauth" if provider == "codex" else provider
+    base = Path(PROVIDER_CONFIG_MAP[provider])
+    local = base.with_name(base.stem + ".local.json")
+    return str(local if local.exists() else base)
+
+
 def choose_ai(
     provider: str | None = None,
     mode: str = "review",
@@ -608,13 +621,9 @@ def choose_ai(
         last = _load_last_provider(default_provider, state_file)
         provider = last if mode == "auto" else _prompt_provider(last)
     provider = "openai-oauth" if provider == "codex" else provider
-    base_config_path = Path(PROVIDER_CONFIG_MAP[provider])
-    local_config_path = base_config_path.with_name(base_config_path.stem + ".local.json")
-    if local_config_path.exists():
-        config_path = str(local_config_path)
-        print(f"Loaded local configuration: {local_config_path.name}")
-    else:
-        config_path = str(base_config_path)
+    config_path = provider_config_path(provider)
+    if config_path.endswith(".local.json"):
+        print(f"Loaded local configuration: {Path(config_path).name}")
     os.environ["AI_CONFIG_PATH"] = config_path
 
     models: list[str] = []
@@ -710,6 +719,9 @@ def run(
         else:
             _prepare_fresh_start()
 
+    creator = None
+    exit_on_ctrl_c(lambda: creator and creator.project_manager.save_project(),
+                   "Process interrupted by user. Progress has been saved.")
     while True:
         creator = AIBookCreator()
         completed = creator.create_book()
@@ -797,6 +809,7 @@ def main() -> None:
         if not author and args.mode == "review":
             author = input("Author name [AI Book Creator]: ").strip()
         os.environ["AI_BOOK_AUTHOR"] = author or "AI Book Creator"
+        os.environ["AI_MODELS_USED_PATH"] = str(PROJECT_OUTPUT_DIR / "models_used.json")
         if args.pages:
             os.environ["AI_BOOK_PAGE_RANGE"] = args.pages
         if args.chapters:

@@ -1,6 +1,5 @@
 {
-  "provider": "openrouter",
-  "use_openai_client": true,
+  "provider": "opencode",
   "writing_model": "deepseek-v4-flash-free",
   "review_model": "deepseek-v4-flash-free",
   "base_url": "https://opencode.ai/zen/v1",

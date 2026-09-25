@@ -248,7 +248,7 @@ class AIBookCreator:
             shutil.move(f, os.path.join(archive_dir, os.path.basename(f)))
             
         # Move analysis & glossary txt (the JSON glossary stays active for continuity)
-        for txt_file in ["book_analysis.txt", "book_glossary.txt"]:
+        for txt_file in ["book_analysis.txt", "book_glossary.txt", "models_used.json"]:
             f_path = os.path.join(self.output_dir, txt_file)
             if os.path.exists(f_path):
                 shutil.move(f_path, os.path.join(archive_dir, txt_file))
