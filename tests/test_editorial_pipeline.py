@@ -140,6 +140,9 @@ class CoverageTests(unittest.TestCase):
         ai = service(json.dumps({"continuity": "fact " * 950}), json.dumps({"continuity": "Alice has the key."}))
         self.assertEqual(editorial.update_continuity(ai, PROSE, "", "Arrival"), "Alice has the key.")
         self.assertIn("950 words", ai.generate_content.call_args_list[1].args[0])
+        # a model that never condenses keeps its shortest record instead of halting the book
+        ai = service(*[json.dumps({"continuity": "fact " * n}) for n in (1100, 1084, 1000, 1050)])
+        self.assertEqual(len(editorial.update_continuity(ai, PROSE, "", "Arrival").split()), 1000)
         ai = service(*["not json"] * 3)
         with self.assertRaisesRegex(ValueError, "Invalid continuity record"):
             editorial.update_continuity(ai, PROSE, "", "Arrival")
