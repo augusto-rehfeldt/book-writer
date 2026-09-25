@@ -42,6 +42,10 @@ opencode.ai rejects calls without an `x-opencode-session` header;
 Menus print context, max output and list price per 1M tokens from models.dev
 (`cli._model_facts`; opencode's `~/.cache/opencode/models.json` when under a day
 old, else live). Display only: the config's `max_output` is still the cap sent.
+With `ARTIFICIAL_ANALYSIS_API_KEY` set, menus also show the Artificial Analysis
+Intelligence Index (`cli._intelligence`, cached a day in
+`~/.cache/ai-book-creator/artificial_analysis.json`). Models are sorted by price.
+Context, output, price and AA are colored green/yellow/red in `_facts_label`.
 
 - `claude` — the Claude Code CLI in print mode, on the user's subscription, no
   key. The prompt goes in **on stdin, never in argv**: Windows caps a command

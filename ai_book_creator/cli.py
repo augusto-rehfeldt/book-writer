@@ -68,6 +68,15 @@ MODELS_DEV_SOURCES = {
     "grok": ("xai",),
     "nvidia": ("nvidia",),
 }
+# Artificial Analysis Intelligence Index per model, cached a day like models.dev.
+AA_URL = "https://artificialanalysis.ai/api/v2/data/llms/models"
+AA_CACHE = Path.home() / ".cache" / "ai-book-creator" / "artificial_analysis.json"
+# Slug words that only name a reasoning setting or release channel.
+AA_VARIANT_WORDS = frozenset(
+    "thinking reasoning nonreasoning non adaptive preview exp low medium high xhigh max minimal".split()
+)
+# Hosted names AA lists under the open-weights model they serve.
+AA_ALIASES = {"qwen3.5-plus": "qwen3-5-397b-a17b"}
 # Paid through a subscription, so the price shown is only the API list rate.
 SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth")
 
@@ -92,8 +101,78 @@ def _models_dev() -> dict:
         return {}
 
 
+@lru_cache(maxsize=None)
+def _artificial_analysis() -> list:
+    """Artificial Analysis model list: disk copy if under a day old, else live, else stale.
+
+    Needs a free key in ARTIFICIAL_ANALYSIS_API_KEY; without one, returns [].
+    """
+    try:
+        if time.time() - AA_CACHE.stat().st_mtime < 86400:
+            return json.loads(AA_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    key = os.environ.get("ARTIFICIAL_ANALYSIS_API_KEY", "").strip()
+    if key:
+        try:
+            req = Request(AA_URL, headers={"x-api-key": key, "User-Agent": "ai-book-creator"})
+            with urlopen(req, timeout=10) as resp:
+                data = json.load(resp).get("data") or []
+            if data:
+                AA_CACHE.parent.mkdir(parents=True, exist_ok=True)
+                AA_CACHE.write_text(json.dumps(data), encoding="utf-8")
+                return data
+        except Exception:
+            pass
+    try:
+        return json.loads(AA_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+
+def _name_key(name: str) -> tuple[tuple[str, ...], frozenset[str]]:
+    """'claude-sonnet-4-5' and 'claude-4-5-sonnet' -> (('4', '5'), {'claude', 'sonnet'}).
+
+    Numbers keep their order (gpt-5.4 is not gpt-4.5); words don't.
+    """
+    parts = [p for p in re.split(r"[^a-z0-9]+", name.lower()) if p and p not in ("free", "contributor")]
+    return (tuple(p for p in parts if p.isdigit()), frozenset(p for p in parts if not p.isdigit()))
+
+
+def _intelligence(mid: str) -> float | None:
+    """Artificial Analysis Intelligence Index for a model id, or None if unmatched."""
+    tail = mid.lower().rsplit("/", 1)[-1]
+    numbers, words = _name_key(AA_ALIASES.get(tail, tail))
+    words -= {"preview", "exp"}  # not "max": gpt-5.1-codex-max is its own model
+    best = None
+    for entry in _artificial_analysis():
+        score = (entry.get("evaluations") or {}).get("artificial_analysis_intelligence_index")
+        if not isinstance(score, (int, float)):
+            continue
+        e_numbers, e_words = _name_key(str(entry.get("slug") or ""))
+        # Trailing multi-digit numbers are snapshot dates: mimo-v2-5-0424, grok-build-0-1-06-16.
+        dated = e_numbers[len(numbers):]
+        if e_numbers[:len(numbers)] != numbers or any(len(n) < 2 for n in dated):
+            continue
+        if not words <= e_words:
+            continue
+        # AA slugs may add the maker and parameter count: nvidia-nemotron-3-ultra-550b-a55b.
+        maker = str((entry.get("model_creator") or {}).get("slug") or "").lower()
+        extra = {w for w in e_words - words if w != maker and not re.fullmatch(r"a?\d+b", w)}
+        # ponytail: AA lists one entry per reasoning setting; best one wins.
+        if extra <= AA_VARIANT_WORDS:
+            best = max(best or 0.0, float(score))
+    return best
+
+
 def _model_facts(provider: str, mid: str) -> dict:
-    """models.dev entry ({"limit": ..., "cost": ...}) for a model, or {} if unlisted."""
+    """models.dev entry ({"limit": ..., "cost": ...}) plus AA "intelligence", or {}."""
+    info = _models_dev_facts(provider, mid)
+    score = _intelligence(mid)
+    return {**info, "intelligence": score} if score is not None else info
+
+
+def _models_dev_facts(provider: str, mid: str) -> dict:
     mid = mid.lower()
     tail = mid.rsplit("/", 1)[-1]
     for source in MODELS_DEV_SOURCES.get(provider, ()):
@@ -116,20 +195,35 @@ def _tokens(n: int) -> str:
 
 def _facts_label(info: dict, max_out: int = 0) -> str:
     """'ctx 1M, out 128K, $4/$20' — price is $ per 1M input/output tokens."""
+    # Green good, yellow middling, red poor.
+    def tier(value: float, good: float, ok: float) -> str:
+        return "32" if value >= good else "33" if value >= ok else "31"
+
     limit = info.get("limit") or {}
-    parts = [f"ctx {_tokens(limit['context'])}"] if limit.get("context") else []
+    context = limit.get("context")
+    parts = [_color(f"ctx {_tokens(context)}", tier(context, 900_000, 250_000))] if context else []
     out = limit.get("output") or max_out
-    parts.append(f"out {_tokens(out)}" if out else "out ?")
+    parts.append(_color(f"out {_tokens(out)}", tier(out, 128_000, 64_000)) if out else "out ?")
     cost = info.get("cost") or {}
     if "input" in cost and "output" in cost:
         free = not (cost["input"] or cost["output"])
         price = "free" if free else f"${cost['input']:.3g}/${cost['output']:.3g}"
         # Tier on output price: that is what a book's worth of prose costs.
-        tier = "32" if cost["output"] < 1 else "33" if cost["output"] < 5 else "31"
-        parts.append(_color(price, tier))
+        parts.append(_color(price, tier(-cost["output"], -1, -5)))
     else:
         parts.append("$?")
+    if _artificial_analysis():
+        score = info.get("intelligence")
+        parts.append(_color(f"AA {score:.0f}", tier(score, 45, 30)) if score is not None else "AA ?")
     return ", ".join(parts)
+
+
+def _cost_key(info: dict) -> tuple:
+    """Menu sort: free first, then output price, then input; unpriced last."""
+    cost = info.get("cost") or {}
+    if "input" not in cost or "output" not in cost:
+        return (1, 0, 0)
+    return (0, cost["output"], cost["input"])
 
 
 def _color(text: str, code: str) -> str:
@@ -359,6 +453,7 @@ def _prompt_openai_model(
     role: str = "",
 ) -> str:
     options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
+    options = tuple(sorted(options, key=lambda m: _cost_key(_model_facts("openai", m))))
     print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
     width = max(map(len, options))
     for index, model in enumerate(options, 1):
@@ -433,7 +528,7 @@ PROVIDER_LABELS = {
 def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -> str:
     models = _provider_models(provider)
     label = PROVIDER_LABELS.get(provider, provider)
-    model_ids = list(models.keys())
+    model_ids = sorted(models, key=lambda mid: _cost_key(_model_facts(provider, mid)))
     print(f"Available {label} models:")
     width = max(map(len, model_ids))
     for i, mid in enumerate(model_ids, 1):
