@@ -76,7 +76,7 @@ AA_VARIANT_WORDS = frozenset(
     "thinking reasoning nonreasoning non adaptive preview exp low medium high xhigh max minimal".split()
 )
 # Hosted names AA lists under the open-weights model they serve.
-AA_ALIASES = {"qwen3.5-plus": "qwen3-5-397b-a17b"}
+AA_ALIASES = {"qwen3.5-plus": "qwen3-5-397b-a17b", "qwen3.8-flash": "qwen3-8-flash-next"}
 # Paid through a subscription, so the price shown is only the API list rate.
 SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth")
 
