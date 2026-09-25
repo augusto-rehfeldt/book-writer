@@ -94,10 +94,12 @@ class WriteStep(BaseStep):
                     raise BrokenProjectStateError(f"Empty saved chapter: {existing_filename}")
                 context_hash = text_digest(memory)
                 changed = False
-                if (existing_chapter.get("source_hash") != text_digest(text)
-                        or existing_chapter.get("context_hash") != context_hash
-                        or not existing_chapter.get("continuity")):
-                    print("  Rebuilding continuity record (chapter text or earlier context changed)...")
+                reason = ("no continuity record yet" if not existing_chapter.get("continuity")
+                          else "chapter text changed" if existing_chapter.get("source_hash") != text_digest(text)
+                          else "earlier chapters' record changed"
+                          if existing_chapter.get("context_hash") != context_hash else "")
+                if reason:
+                    print(f"  Rebuilding continuity record ({reason})...")
                     existing_chapter["continuity"] = update_continuity(
                         self.ai_service, text, memory, chapter_data["title"])
                     existing_chapter["source_hash"] = text_digest(text)

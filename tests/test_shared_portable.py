@@ -245,6 +245,12 @@ class CliIsolationTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as raised:
             self.run_cli(api.opencode_chat, stdout=json.dumps(refusal))
         self.assertEqual(raised.exception.status_code, 403)
+        silent = [{"type": "step_start", "part": {"id": "x" * 400}},
+                  {"type": "step_finish", "part": {"reason": "stop", "tokens": {"output": 0}}}]
+        with self.assertRaises(RuntimeError) as raised:
+            self.run_cli(api.opencode_chat, stdout="\n".join(map(json.dumps, silent)))
+        self.assertEqual(str(raised.exception), "opencode model returned no text "
+                         "(events step_start, step_finish; finish reason stop, 0 output tokens)")
 
     def test_gui_hosts_find_npm_installed_clis(self):
         with tempfile.TemporaryDirectory() as folder:

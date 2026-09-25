@@ -270,12 +270,17 @@ def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional
             "-m", model if "/" in model else f"opencode/{model}"]
     proc = _run_cli(args, f"{_cli_system(system)}\n\n{prompt}", timeout)
     texts: List[str] = []
+    kinds: List[str] = []
+    finish: Dict[str, Any] = {}
     for line in (proc.stdout or "").splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
         kind = event.get("type")
+        kinds.append(str(kind))
+        if kind == "step_finish":
+            finish = event.get("part") or {}
         if kind == "step_start":
             texts = []  # keep the final step: earlier ones are narration around tool calls
         elif kind == "text":
@@ -288,9 +293,17 @@ def opencode_chat(model: str, prompt: str, timeout: int = 1800, system: Optional
             raise failure
     out = "".join(texts).strip()
     if not out:
-        raise RuntimeError(
-            f"opencode {model} returned no text: {(proc.stderr or proc.stdout or '').strip()[:300]}"
-        )
+        # A raw JSON event dump is unreadable; name what the stream held instead.
+        detail = f"events {', '.join(dict.fromkeys(kinds)) or 'none'}"
+        if finish:
+            tokens = finish.get("tokens") or {}
+            detail += f"; finish reason {finish.get('reason') or 'unknown'}"
+            if isinstance(tokens, dict) and "output" in tokens:
+                detail += f", {tokens['output']} output tokens"
+        stderr = (proc.stderr or "").strip()
+        if stderr:
+            detail += f"; stderr: {stderr[:300]}"
+        raise RuntimeError(f"opencode {model} returned no text ({detail})")
     return out
 
 
