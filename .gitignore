@@ -5,8 +5,17 @@ book_output/
 __pycache__/
 *.py[cod]
 *.pyc
-tests/
-benchmarks/
+tests/*
+!tests/test_editorial_pipeline.py
+!tests/test_humanizer.py
+!tests/test_chapter_budget.py
+!tests/test_service_contract.py
+!tests/test_shared_*.py
+benchmarks/*
+!benchmarks/evaluate_prose.py
+!benchmarks/prose_cases.json
+!benchmarks/build_prose_baseline.py
+!benchmarks/measure_chapter_shape.py
 codebase_to_text_output.txt
 
 # Local/OS files
@@ -28,3 +37,8 @@ ai_book_creator/config/*key*.txt
 .env
 .env.local
 
+# Shared service accounting is local runtime state.
+ai_book_creator/config/*usage_state.json
+ai_book_creator/config/*rate_state.json
+*.lock
+*.tmp

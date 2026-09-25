@@ -3,56 +3,27 @@ Step 1: Create Structure - Chapter breakdown with plots
 """
 
 import os
-import random
 import re
 import time
-import zlib
 from typing import Dict, Any, List, Optional
 from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
 from ..utils import humanizer
-from ..utils.name_generator import generate_name_pools, pick_random_name
+from ..utils.name_generator import generate_name_pools
 
 
-def chapter_budget(chapter_count: int, total_words: int, seed: int = 0) -> List[int]:
-    """Per-chapter word budgets shaped like a real novel's, summing to the target.
-
-    Published chapters are not all one size: measured over 591 chapters of the
-    reference corpus, the ratio of a chapter to its book's median runs 0.27 at
-    the 2nd percentile and 2.22 at the 98th, and 8% of chapters are under half
-    the median (benchmarks/measure_chapter_shape.py). We sample that empirical
-    quantile curve once per stratum, so a book gets the whole spread rather than
-    one repeated number. Missing baseline -> flat budgets, as before.
-    """
-    if chapter_count < 3:
-        return [max(400, total_words // max(1, chapter_count))] * max(1, chapter_count)
-
-    shape = (humanizer.baseline() or {}).get("chapter_shape", {}).get("ratio_to_median")
-    if not shape:
-        return [max(400, total_words // chapter_count)] * chapter_count
-
-    anchors = sorted((int(k[1:]) / 100, float(v)) for k, v in shape.items())
-    rng = random.Random(seed)
-
-    def ratio(u: float) -> float:
-        if u <= anchors[0][0]:
-            return anchors[0][1]
-        for (q0, r0), (q1, r1) in zip(anchors, anchors[1:]):
-            if u <= q1:
-                return r0 + (r1 - r0) * (u - q0) / (q1 - q0)
-        return anchors[-1][1]
-
-    # One draw per equal-probability stratum reproduces the measured spread even
-    # for a 12-chapter book, where plain sampling would usually miss both tails.
-    ratios = [ratio((i + rng.random()) / chapter_count) for i in range(chapter_count)]
-    rng.shuffle(ratios)
-    # Opening chapters carry the setup; novels rarely start on the runt.
-    if ratios[0] < 0.8:
-        longest = max(range(chapter_count), key=ratios.__getitem__)
-        ratios[0], ratios[longest] = ratios[longest], ratios[0]
-
-    scale = total_words / sum(ratios)
-    return [max(400, int(round(r * scale / 50)) * 50) for r in ratios]
+def chapter_budget(estimates: List[int], total_words: int) -> List[int]:
+    """Scale scene-based estimates while preserving order and the book total."""
+    if not estimates:
+        return []
+    remaining = total_words - 400 * len(estimates)
+    if remaining < 0:
+        raise ValueError("Book target allows fewer than 400 words per chapter; reduce chapter count")
+    weights = [max(1, estimate - 400) for estimate in estimates]
+    budgets = [400 + remaining * weight // sum(weights) for weight in weights]
+    for index in range(total_words - sum(budgets)):
+        budgets[index] += 1
+    return budgets
 
 
 class StructureStep(BaseStep):
@@ -102,18 +73,6 @@ class StructureStep(BaseStep):
                 self.glossary_manager.set_name_pools(name_pools)
             print(f"✅ Generated {len(name_pools)} name pools.")
 
-        # --- NEW: Replace AI-generated character names with random names from pools ---
-        layout_content = init_data.get("layout_content", "")
-        if layout_content and name_pools:
-            new_layout, replaced_count = self._replace_character_names_with_pools(
-                layout_content, name_pools, init_data
-            )
-            if replaced_count > 0:
-                print(f"🎭 Replaced {replaced_count} character names using name pools.")
-                init_data["layout_content"] = new_layout
-                self.project_manager.set_step_data("init", init_data)
-                self.project_manager.save_project()
-
         # Create chapter breakdown only when we do not already have cached structure text
         if not structure_content:
             structure_content = self._create_structure(init_data)
@@ -127,14 +86,14 @@ class StructureStep(BaseStep):
 
         chapters = self._extract_chapters(structure_content)
 
-        # The model copies the assigned budgets unreliably, so the budget wins:
-        # this is what keeps chapter lengths uneven and the book total on target.
+        # Scope determines chapter length. Scale the model's scene-based estimates
+        # to the requested book total without shuffling their narrative order.
         if chapters:
-            budget = self._chapter_budget(init_data, len(chapters))
-            for chapter, words in zip(chapters, budget):
-                chapter["word_count_estimate"] = words
-            print(f"📏 Chapter budgets: {min(budget)}-{max(budget)} words, "
-                  f"{sum(budget):,} total")
+            target = int(init_data.get("target_word_count") or
+                         int(init_data.get("page_count", 400)) * int(init_data.get("words_per_page", 250)))
+            estimates = [max(1, int(c.get("word_count_estimate", 1500))) for c in chapters]
+            for chapter, budget in zip(chapters, chapter_budget(estimates, target)):
+                chapter["word_count_estimate"] = budget
 
         # Create plots for each chapter (now with name pools injected)
         chapter_plots = self._create_plots(chapters, init_data, name_pools)
@@ -157,81 +116,6 @@ class StructureStep(BaseStep):
         self.save_step_data(structure_data)
         self.mark_completed()
         return structure_data
-
-    # -------------------------------------------------------------------------
-    # Replace AI‑generated character names with random picks from pools
-    # -------------------------------------------------------------------------
-    def _replace_character_names_with_pools(
-        self, layout_content: str, name_pools: Dict[str, List[str]], init_data: Dict
-    ) -> tuple[str, int]:
-        # Find the "Main Characters" section
-        main_char_section_match = re.search(
-            r"(?i)(?:##\s*Main\s+Characters|###\s*Main\s+Characters)(.*?)(?=\n##|\n###|\Z)",
-            layout_content,
-            re.DOTALL,
-        )
-        if not main_char_section_match:
-            return layout_content, 0
-
-        section_text = main_char_section_match.group(1)
-        original_section = section_text
-        replaced_count = 0
-        new_section_lines = []
-
-        lines = section_text.splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i]
-            stripped = line.strip()
-            # Look for a line that contains a bold name
-            bold_name_match = re.search(r"\*\*([^*]+)\*\*", stripped)
-            if bold_name_match and not stripped.startswith(("Role", "Description", "- **Role")):
-                old_name = bold_name_match.group(1).strip()
-                # Determine a suitable pool category
-                pool_category = "protagonists"
-                role_hint = ""
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    if "Role:" in next_line or "role:" in next_line:
-                        role_hint = next_line
-                if "antagonist" in role_hint.lower():
-                    pool_category = "antagonists"
-                elif "sidekick" in role_hint.lower() or "support" in role_hint.lower():
-                    pool_category = "supporting_characters"
-                
-                # Pick a random name from the pool
-                new_name = pick_random_name(name_pools, pool_category, "any_character")
-                if not new_name:
-                    for pool in name_pools.values():
-                        if pool:
-                            new_name = pool[0]
-                            break
-                if new_name and new_name != old_name:
-                    # Replace in the line
-                    new_line = line.replace(f"**{old_name}**", f"**{new_name}**")
-                    new_section_lines.append(new_line)
-                    replaced_count += 1
-                    # Update glossary manager
-                    if self.glossary_manager:
-                        desc_lines = []
-                        j = i + 1
-                        while j < len(lines) and not re.search(r"\*\*[^*]+\*\*", lines[j].strip()):
-                            desc_lines.append(lines[j].strip())
-                            j += 1
-                        description = " ".join(desc_lines).strip()
-                        if description:
-                            self.glossary_manager.add_character(new_name, description)
-                    i += 1
-                    continue
-            new_section_lines.append(line)
-            i += 1
-
-        if replaced_count == 0:
-            return layout_content, 0
-
-        new_section_text = "\n".join(new_section_lines)
-        new_layout = layout_content.replace(original_section, new_section_text)
-        return new_layout, replaced_count
 
     def _create_structure(self, init_data: Dict) -> str:
         print("🔄 Generating chapter structure...")
@@ -274,8 +158,9 @@ class StructureStep(BaseStep):
 
     def _build_structure_prompt(self, init_data: Dict) -> tuple[str, int]:
         is_groq = getattr(self.ai_service, "provider", "") == "groq"
-        book_idea = self._truncate_text(init_data.get("book_idea", ""), 350 if is_groq else 500)
-        layout_content = self._truncate_text(init_data.get("layout_content", ""), 1400 if is_groq else 3500)
+        book_idea = init_data.get("book_idea", "")
+        layout_content = init_data.get("layout_content", "")
+        context_tokens = (len(book_idea) + len(layout_content)) // 4 + 2
         series_layout = self._truncate_text(init_data.get("series_layout_content", ""), 900 if is_groq else 1800)
         series_mode = bool(init_data.get("series_mode"))
         page_count = int(init_data.get("page_count", 400))
@@ -284,8 +169,6 @@ class StructureStep(BaseStep):
         # User-validated chapter count from Step 0; fall back to ~3000 wpc if absent
         # (e.g. projects saved before the chapter-count prompt existed).
         chapter_count = int(init_data.get("chapter_count") or max(10, target_word_count // 3000))
-        budget = self._chapter_budget(init_data)
-        budget_text = ", ".join(f"{i}:{w}" for i, w in enumerate(budget, 1))
         opening_style_list = (
             "in medias res, dialogue-led, sensory close-up, object-focused, institutional briefing, "
             "procedural action, quiet reflection, cross-cut, suspense hook, comic friction, aftermath, "
@@ -316,17 +199,16 @@ class StructureStep(BaseStep):
                         "Keep Summary to 15-20 words after the tag. Keep Key events to at most 3 short phrases "
                         "separated by semicolons. Vary opening style tags across adjacent chapters so the structure "
                         f"feels scene-specific and novelistic. Use exactly {chapter_count} chapters. "
-                        "The Word count column is fixed: copy the assigned budget for that chapter, "
-                        f"in chapter:words form here — {budget_text}. "
+                        f"Choose each word count from its scene scope, totaling about {target_word_count} words. "
                         "Scale each chapter's scope to its budget: a short budget is one scene or a single beat, "
                         "a long budget carries several. Avoid a mechanically alternating pattern or evenly "
                         "spaced reversals.",
                     ),
                 ],
-                max_prompt_tokens=3000,
+                max_prompt_tokens=3000 + context_tokens,
                 section_token_caps={
-                    "Book idea": 180,
-                    "Layout summary": 700,
+                    "Book idea": len(book_idea) // 4 + 1,
+                    "Layout summary": len(layout_content) // 4 + 1,
                     "Series layout": 450,
                     "Output rules": 700,
                 },
@@ -357,33 +239,24 @@ class StructureStep(BaseStep):
                     f"{opening_style_list}. "
                     "Vary the opening style tag from chapter to chapter so adjacent chapters do not feel mechanically similar. "
                     "Then write a 2-3 sentence summary, key events, and end the line with "
-                    "'Word count: N', where N is that chapter's assigned budget. "
-                    f"The budgets are fixed and deliberately uneven, in chapter:words form — {budget_text}. "
+                    "'Word count: N', where N follows the dramatic scope of its scenes. "
+                    f"The estimates should total about {target_word_count} words. "
                     "Scale each chapter's scope to its own budget: a short budget is one scene or a single "
                     "beat, seen through one viewpoint, and a long budget carries several. Do not place "
                     "revelations, reversals, or quiet chapters at mechanically regular intervals. Keep "
                     "openings specific, concrete, and distinct in tone and sentence shape.",
                 ),
             ],
-            max_prompt_tokens=8000,
+            max_prompt_tokens=8000 + context_tokens,
             section_token_caps={
-                "Book idea": 250,
-                "Layout summary": 2500,
+                "Book idea": len(book_idea) // 4 + 1,
+                "Layout summary": len(layout_content) // 4 + 1,
                 "Series layout": 1200,
                 "Output rules": 900,
             },
         )
         return prompt, 32000
     
-    def _chapter_budget(self, init_data: Dict, chapter_count: int = 0) -> List[int]:
-        """The book's word budgets. Seeded on the idea, so a resume rebuilds them."""
-        page_count = int(init_data.get("page_count", 400))
-        words_per_page = int(init_data.get("words_per_page", 250))
-        total = int(init_data.get("target_word_count") or page_count * words_per_page)
-        count = chapter_count or int(init_data.get("chapter_count") or max(10, total // 3000))
-        seed = zlib.crc32(init_data.get("book_idea", "").encode("utf-8", "replace"))
-        return chapter_budget(count, total, seed)
-
     def _extract_chapters(self, content: str) -> List[Dict]:
         chapters = []
         lines = content.split('\n')
@@ -604,10 +477,14 @@ class StructureStep(BaseStep):
                     f"The chapter is {budget} words long, so outline only what fits that length. "
                     "Be detailed but concise. "
                     "When introducing new characters, use names from the provided name pools. "
-                    "If a character already exists in the glossary, reuse that name."
+                    "Names and identities in the approved layout are fixed. Reuse them exactly. "
+                    "For each scene identify viewpoint, want, obstacle, choice and consequence; "
+                    "omit formulaic beats where a quiet or unresolved scene calls for it. "
+                    "State how its pace follows the dramatic purpose, and carry unresolved consequences forward."
                 ),
                 sections=[
                     ("Book summary", init_data["book_idea"][:500]),
+                    ("Neighboring chapter summaries", "\n".join(str(c.get("content", "")) for c in chapters[max(0, i - 2):i + 1])),
                     *([("Series layout", series_layout)] if series_layout else []),
                     ("Chapter summary", chapter.get("content", "")),
                     ("Opening style tag", chapter.get("opening_style", "")),
@@ -617,6 +494,7 @@ class StructureStep(BaseStep):
                 max_prompt_tokens=7000,
                 section_token_caps={
                     "Book summary": 200,
+                    "Neighboring chapter summaries": 700,
                     "Series layout": 500,
                     "Chapter summary": 1000,
                     "Opening style tag": 60,
@@ -625,6 +503,10 @@ class StructureStep(BaseStep):
                 },
             )
 
+            # These are canonical facts, not a prefix excerpt of the character list.
+            prompt += "\n\nAPPROVED IDENTITIES AND VOICE:\n" + init_data.get("layout_content", "")
+            if self.glossary_manager:
+                prompt += "\n\nGLOSSARY:\n" + self.glossary_manager._format_glossary_content()
             plot = self.ai_service.generate_content(prompt, max_completion_tokens=1200)
             if not plot.strip():
                 raise BrokenProjectStateError(

@@ -7,12 +7,17 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
+import time
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 # ponytail: load_local_env() runs once in ai_book_creator/__init__.py on import.
 from .core.book_creator import AIBookCreator
+from .env import exit_on_ctrl_c
 from .services.ai_service import ensure_openai_oauth_proxy, load_opencode_go_sync
 
 
@@ -29,15 +34,135 @@ PROVIDER_CONFIG_MAP = {
     "opencode-go": str(PACKAGE_ROOT / "config" / "ai_config_opencode_go.json"),
     "opencode-zen": str(PACKAGE_ROOT / "config" / "ai_config_opencode_zen.json"),
     "claude": str(PACKAGE_ROOT / "config" / "ai_config_claude.json"),
+    "commandcode": str(PACKAGE_ROOT / "config" / "ai_config_commandcode.json"),
     "hyper": str(PACKAGE_ROOT / "config" / "ai_config_hyper.json"),
+    "grok": str(PACKAGE_ROOT / "config" / "ai_config_grok.json"),
+    "nvidia": str(PACKAGE_ROOT / "config" / "ai_config_nvidia.json"),
 }
 # Providers whose model list lives in their config file and is picked at runtime.
-CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "hyper")
+CATALOGUE_PROVIDERS = ("opencode-go", "opencode-zen", "claude", "commandcode", "hyper", "grok", "nvidia")
 PROJECT_OUTPUT_DIR = REPO_ROOT / "book_output"
 PROJECT_STATE_FILE = PROJECT_OUTPUT_DIR / "project_data.json"
 PROVIDER_STATE_FILE = REPO_ROOT / "book_output" / "provider_state.json"
 PROJECT_ARCHIVE_DIR = PROJECT_OUTPUT_DIR / "archive" / "ebooks"
 OPENAI_MODEL_OPTIONS = ("gpt-5.4", "gpt-5.4-mini")
+
+# models.dev publishes each model's context/output limits and list price per 1M
+# tokens; opencode keeps a copy of it on disk. Sources are searched in order.
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_CACHE = Path.home() / ".cache" / "opencode" / "models.json"
+MODELS_DEV_SOURCES = {
+    "google": ("google",),
+    "openai": ("openai",),
+    "openai-oauth": ("openai",),
+    "groq": ("groq",),
+    "minimax": ("minimax",),
+    "openrouter": ("openrouter",),
+    "opencode-go": ("opencode-go",),
+    "opencode-zen": ("opencode",),
+    "claude": ("anthropic",),
+    # Command Code resells other labs' models; show the maker's price when
+    # models.dev has it, else OpenRouter's.
+    "commandcode": ("anthropic", "openai", "google", "openrouter"),
+    "hyper": ("hyper",),
+    "grok": ("xai",),
+    "nvidia": ("nvidia",),
+}
+# Paid through a subscription, so the price shown is only the API list rate.
+SUBSCRIPTION_PROVIDERS = ("claude", "commandcode", "opencode-go", "openai-oauth")
+
+
+@lru_cache(maxsize=None)
+def _models_dev() -> dict:
+    """models.dev catalogue: opencode's copy if under a day old, else live, else stale."""
+    try:
+        if time.time() - MODELS_DEV_CACHE.stat().st_mtime < 86400:
+            return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    try:
+        req = Request(MODELS_DEV_URL, headers={"User-Agent": "ai-book-creator"})
+        with urlopen(req, timeout=10) as resp:
+            return json.load(resp)
+    except Exception:
+        pass
+    try:
+        return json.loads(MODELS_DEV_CACHE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _model_facts(provider: str, mid: str) -> dict:
+    """models.dev entry ({"limit": ..., "cost": ...}) for a model, or {} if unlisted."""
+    mid = mid.lower()
+    tail = mid.rsplit("/", 1)[-1]
+    for source in MODELS_DEV_SOURCES.get(provider, ()):
+        models = (_models_dev().get(source) or {}).get("models") or {}
+        # Claude Code aliases ("opus") follow the newest model of that family.
+        family = [m for m in models.values() if m.get("family") == f"claude-{mid}"]
+        if provider == "claude" and family:
+            return max(family, key=lambda m: m.get("release_date", ""))
+        by_id = {key.lower(): info for key, info in models.items()}
+        by_tail = {key.lower().rsplit("/", 1)[-1]: info for key, info in models.items()}
+        if mid in by_id or tail in by_tail:
+            return by_id.get(mid) or by_tail[tail]
+    return {}
+
+
+def _tokens(n: int) -> str:
+    """1048576 -> '1M', 131072 -> '131K'."""
+    return f"{n / 1e6:.3g}M" if n >= 999_500 else f"{round(n / 1e3)}K"
+
+
+def _facts_label(info: dict, max_out: int = 0) -> str:
+    """'ctx 1M, out 128K, $4/$20' — price is $ per 1M input/output tokens."""
+    limit = info.get("limit") or {}
+    parts = [f"ctx {_tokens(limit['context'])}"] if limit.get("context") else []
+    out = limit.get("output") or max_out
+    parts.append(f"out {_tokens(out)}" if out else "out ?")
+    cost = info.get("cost") or {}
+    if "input" in cost and "output" in cost:
+        free = not (cost["input"] or cost["output"])
+        price = "free" if free else f"${cost['input']:.3g}/${cost['output']:.3g}"
+        # Tier on output price: that is what a book's worth of prose costs.
+        tier = "32" if cost["output"] < 1 else "33" if cost["output"] < 5 else "31"
+        parts.append(_color(price, tier))
+    else:
+        parts.append("$?")
+    return ", ".join(parts)
+
+
+def _color(text: str, code: str) -> str:
+    """ANSI-colored text on a terminal; plain when piped or NO_COLOR is set."""
+    if os.environ.get("NO_COLOR") or not sys.stdout.isatty():
+        return text
+    os.system("")  # turns on ANSI escape handling in the Windows console
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _live_model_ids(provider: str) -> set[str] | None:
+    """Model ids the provider serves right now, or None when it can't be asked."""
+    try:
+        if provider == "commandcode":
+            listing = subprocess.run(
+                [shutil.which("cmdc") or "cmdc", "--list-models"],
+                capture_output=True, text=True, encoding="utf-8", timeout=15, check=True,
+            ).stdout
+            return {line.split()[0].lower() for line in listing.splitlines() if line.strip()}
+        with open(PROVIDER_CONFIG_MAP[provider], "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not data.get("base_url"):
+            return None
+        # opencode's CDN answers urllib's default User-Agent with a 403.
+        req = Request(data["base_url"].rstrip("/") + "/models",
+                      headers={"User-Agent": "ai-book-creator"})
+        key = os.environ.get(data.get("api_key_env", ""), "")
+        if key:
+            req.add_header("Authorization", f"Bearer {key}")
+        with urlopen(req, timeout=5) as resp:
+            return {str(m["id"]).lower() for m in json.load(resp)["data"]}
+    except Exception:
+        return None
 
 
 def _load_catalogue(provider: str) -> dict:
@@ -50,18 +175,23 @@ def _load_catalogue(provider: str) -> dict:
             out[str(mid).lower()] = [str(info.get("name", mid)), int(info.get("max_output", 4096))]
     except Exception:
         pass
-    # Then overlay opencode's userspace truth so context/output stays fresh
-    # for the paid opencode-go tier; the zen config already lists its free tier.
-    # ponytail: opencode auth.json also drives the key; this keeps the two in lockstep.
+    # Then overlay the output limits from opencode's userspace config for the
+    # curated opencode-go models; the live listing below decides what exists.
     if provider == "opencode-go":
-        synced = load_opencode_go_sync().get("models", {})
-        for mid, info in synced.items():
+        for mid, info in load_opencode_go_sync().get("models", {}).items():
             if mid in out:
                 out[mid][1] = int(info["max_output"])
-            else:
-                out[mid] = [info.get("name", mid), int(info["max_output"])]
-        if synced:
-            out = {mid: entry for mid, entry in out.items() if mid in synced}
+    # Drop curated ids the provider has retired, so the menu never offers a
+    # dead model. Offline or unreachable: keep the curated list as is.
+    live = _live_model_ids(provider) if provider != "claude" else None
+    if live and any(mid in live for mid in out):
+        out = {mid: entry for mid, entry in out.items() if mid in live}
+        # And offer what the provider added since the list was curated, when
+        # models.dev can say how much it writes (skips image/embedding ids).
+        for mid in sorted(live - set(out)):
+            max_out = int((_model_facts(provider, mid).get("limit") or {}).get("output") or 0)
+            if max_out:
+                out[mid] = [mid, max_out]
     if not out:
         fallback = (
             {"deepseek-v4-flash-free": ["DeepSeek V4 Flash Free", 128000]}
@@ -93,13 +223,15 @@ PROJECT_ARTIFACT_PATTERNS = (
     "book_glossary.txt",
     "checkpoint_*.json",
     "chapter_*.txt",
+    "models_used.json",
 )
 
 
-def _load_provider_state() -> dict:
+def _load_provider_state(state_file: Path | None = None) -> dict:
+    state_file = state_file or PROVIDER_STATE_FILE
     try:
-        if PROVIDER_STATE_FILE.exists():
-            with PROVIDER_STATE_FILE.open("r", encoding="utf-8") as f:
+        if state_file.exists():
+            with state_file.open("r", encoding="utf-8") as f:
                 data = json.load(f)
             if isinstance(data, dict):
                 return data
@@ -108,8 +240,8 @@ def _load_provider_state() -> dict:
     return {}
 
 
-def _load_last_provider(default_provider: str = "google") -> str:
-    data = _load_provider_state()
+def _load_last_provider(default_provider: str = "google", state_file: Path | None = None) -> str:
+    data = _load_provider_state(state_file)
     provider = str(data.get("provider", "")).lower()
     if provider in PROVIDER_CONFIG_MAP:
         return provider
@@ -137,8 +269,9 @@ def _load_last_openai_model(
     default_model: str | None = None,
     options: tuple[str, ...] = OPENAI_MODEL_OPTIONS,
     state_key: str = "openai_model",
+    state_file: Path | None = None,
 ) -> str:
-    data = _load_provider_state()
+    data = _load_provider_state(state_file)
     model = str(data.get(state_key, "")).lower()
     if model in options:
         return model
@@ -147,8 +280,10 @@ def _load_last_openai_model(
 
 
 def _save_last_provider(provider: str, openai_model: str | None = None,
-                        catalogue_model: str | None = None) -> None:
-    data = _load_provider_state()
+                        catalogue_model: str | None = None,
+                        state_file: Path | None = None, extra: dict | None = None) -> None:
+    state_file = state_file or PROVIDER_STATE_FILE
+    data = _load_provider_state(state_file)
     provider = provider.lower()
     data["provider"] = provider
     if openai_model is not None:
@@ -162,18 +297,16 @@ def _save_last_provider(provider: str, openai_model: str | None = None,
             data[key] = catalogue_model.lower()
         elif str(data.get(key, "")).lower() not in models:
             data[key] = next(iter(models))
+    data.update(extra or {})
 
-    PROVIDER_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with PROVIDER_STATE_FILE.open("w", encoding="utf-8") as f:
+    state_file.parent.mkdir(parents=True, exist_ok=True)
+    with state_file.open("w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def _prompt_provider(default_provider: str) -> str:
     valid_providers = list(PROVIDER_CONFIG_MAP.keys())
-    prompt = (
-        f"Choose provider [default: {default_provider}] "
-        f"({', '.join(valid_providers)}): "
-    )
+    prompt = f"Choose provider ({', '.join(valid_providers)}) [default: {default_provider}]: "
 
     while True:
         try:
@@ -223,22 +356,22 @@ def _load_openai_oauth_models() -> dict[str, tuple[int | None, int | None]]:
 def _prompt_openai_model(
     default_model: str,
     model_info: dict[str, tuple[int | None, int | None]] | None = None,
+    role: str = "",
 ) -> str:
     options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
     print("Available OpenAI OAuth text models (live):" if model_info is not None else "Available OpenAI models:")
+    width = max(map(len, options))
     for index, model in enumerate(options, 1):
         context, output = model_info.get(model, (None, None)) if model_info is not None else (None, None)
-        limits = []
-        if context:
-            limits.append(f"context {context:,}")
-        if output:
-            limits.append(f"max output {output:,}")
-        detail = f" — {', '.join(limits)}" if limits else ""
+        info = _model_facts("openai", model)
+        # The OAuth endpoint's own figures win over models.dev when it reports them.
+        reported = {k: v for k, v in (("context", context), ("output", output)) if v}
+        info = {**info, "limit": {**(info.get("limit") or {}), **reported}}
         marker = " (default)" if model == default_model else ""
-        print(f"  {index}. {model}{detail}{marker}")
-    if model_info is not None and not any(context or output for context, output in model_info.values()):
-        print("  Context/output limits: not reported by the OAuth /v1/models endpoint.")
-    prompt = f"Choose model number or id [default: {default_model}]: "
+        print(f"  {index:2d}. {model:<{width}}  {_facts_label(info)}{marker}")
+    paid_by = "; your ChatGPT subscription pays" if model_info is not None else ""
+    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
+    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
 
     while True:
         try:
@@ -275,33 +408,42 @@ def _default_catalogue_model(provider: str) -> str:
     return next(iter(models))
 
 
-def _load_last_catalogue_model(provider: str, default_model: str | None = None) -> str:
+def _load_last_catalogue_model(provider: str, default_model: str | None = None,
+                               state_key: str | None = None, state_file: Path | None = None) -> str:
     models = _provider_models(provider)
-    data = _load_provider_state()
-    model = str(data.get(_model_state_key(provider), "")).lower()
+    data = _load_provider_state(state_file)
+    model = str(data.get(state_key or _model_state_key(provider), "")).lower()
     if model in models:
         return model
-    return default_model or _default_catalogue_model(provider)
+    if default_model and default_model.lower() in models:
+        return default_model.lower()
+    return _default_catalogue_model(provider)
 
 
 PROVIDER_LABELS = {
     "opencode-go": "OpenCode Go",
-    "opencode-zen": "OpenCode Zen free",
+    "opencode-zen": "OpenCode Zen (through the OpenCode CLI)",
     "claude": "Claude Code (your subscription, no API key)",
+    "commandcode": "Command Code (your subscription, no API key)",
     "hyper": "hyper.charm.land",
+    "grok": "xAI Grok",
 }
 
 
-def _prompt_catalogue_model(provider: str, default_model: str) -> str:
+def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -> str:
     models = _provider_models(provider)
     label = PROVIDER_LABELS.get(provider, provider)
     model_ids = list(models.keys())
     print(f"Available {label} models:")
+    width = max(map(len, model_ids))
     for i, mid in enumerate(model_ids, 1):
         name, max_out = models[mid]
         marker = " (default)" if mid == default_model else ""
-        print(f"  {i:2d}. {mid} — {name} (max output {max_out:,}){marker}")
-    prompt = f"Choose model number or id [default: {default_model}]: "
+        facts = _facts_label(_model_facts(provider, mid), max_out)
+        print(f"  {i:2d}. {mid:<{width}}  {facts}{marker}")
+    paid_by = "; your subscription pays" if provider in SUBSCRIPTION_PROVIDERS else ""
+    print(f"  $ = API list price per 1M in/out tokens{paid_by}.")
+    prompt = f"Choose {role + ' ' if role else ''}model number or id [default: {default_model}]: "
 
     while True:
         try:
@@ -445,6 +587,108 @@ def _prepare_fresh_start() -> None:
     _clear_project_output()
 
 
+def provider_config_path(provider: str) -> str:
+    """Config file AIService should load for a provider: the user's .local.json copy when present.
+
+    Consumers that choose the provider themselves (book-watch's report picker, lamplight's
+    wizard, the calibre plugin) call this instead of the interactive choose_ai menu.
+    """
+    provider = "openai-oauth" if provider == "codex" else provider
+    base = Path(PROVIDER_CONFIG_MAP[provider])
+    local = base.with_name(base.stem + ".local.json")
+    return str(local if local.exists() else base)
+
+
+def choose_ai(
+    provider: str | None = None,
+    mode: str = "review",
+    state_file: Path | None = None,
+    roles: tuple[str, ...] = ("writing",),
+    defaults: tuple[str, ...] = (),
+    default_provider: str = "google",
+) -> tuple[str, str, list[str]]:
+    """Provider and model menu shared by every script that uses AIService.
+
+    Book writer, mathforge and music writer all call this one function, so a
+    provider or model added here, or newly served by a provider, shows up in
+    each of them. Asks for the provider unless one is given, then one model per
+    role (the first role writes, the last reviews). mode="auto" asks nothing and
+    reuses the picks remembered in state_file (default: book writer's).
+    Exports AI_CONFIG_PATH, the role models and completion caps; returns
+    (provider, config path, models).
+    """
+    if provider is None:
+        last = _load_last_provider(default_provider, state_file)
+        provider = last if mode == "auto" else _prompt_provider(last)
+    provider = "openai-oauth" if provider == "codex" else provider
+    config_path = provider_config_path(provider)
+    if config_path.endswith(".local.json"):
+        print(f"Loaded local configuration: {Path(config_path).name}")
+    os.environ["AI_CONFIG_PATH"] = config_path
+
+    models: list[str] = []
+    state_keys: list[str] = []
+    label = lambda role: role if len(roles) > 1 else ""
+    if provider in ("openai", "openai-oauth"):
+        model_info = _load_openai_oauth_models() if provider == "openai-oauth" else None
+        options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
+        base_key = "openai_oauth_model" if provider == "openai-oauth" else "openai_model"
+        for i, role in enumerate(roles):
+            key = base_key if i == 0 else f"{base_key}_{role}"
+            fallback = defaults[i] if i < len(defaults) else (
+                "gpt-5.6-terra" if provider == "openai-oauth" else None)
+            default_model = _load_last_openai_model(fallback, options, key, state_file)
+            models.append(default_model if mode == "auto"
+                          else _prompt_openai_model(default_model, model_info, label(role)))
+            state_keys.append(key)
+        os.environ["AI_WRITING_MODEL"] = models[0]
+        os.environ["AI_REVIEW_MODEL"] = models[-1]
+        os.environ["AI_OPENAI_MODEL"] = models[0]
+    elif provider in CATALOGUE_PROVIDERS:
+        for i, role in enumerate(roles):
+            key = _model_state_key(provider) + ("" if i == 0 else f"_{role}")
+            fallback = defaults[i] if i < len(defaults) else None
+            default_model = _load_last_catalogue_model(provider, fallback, key, state_file)
+            models.append(default_model if mode == "auto"
+                          else _prompt_catalogue_model(provider, default_model, label(role)))
+            state_keys.append(key)
+        os.environ["AI_WRITING_MODEL"] = models[0]
+        os.environ["AI_REVIEW_MODEL"] = models[-1]
+        # The Claude Code CLI has no completion-token argument, so its catalogue
+        # carries max_output 0 and the caps stay unset.
+        write_out = _provider_models(provider)[models[0]][1]
+        review_out = _provider_models(provider)[models[-1]][1]
+        for key, max_out in (
+            ("AI_WRITING_COMPLETION_TOKENS", write_out),
+            ("AI_REVIEW_COMPLETION_TOKENS", review_out),
+            ("AI_PLANNING_COMPLETION_TOKENS", write_out),
+            ("AI_DEFAULT_COMPLETION_TOKENS", write_out),
+        ):
+            if max_out:
+                os.environ[key] = str(max_out)
+            else:
+                os.environ.pop(key, None)
+    else:
+        # No model menu for these providers; still show what the config runs on.
+        with open(config_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        writing = data.get("writing_model") or ""
+        review = data.get("review_model") or writing
+        for mid in dict.fromkeys(filter(None, (writing, review))):
+            print(f"Model {mid}: {_facts_label(_model_facts(provider, mid))} ($ per 1M in/out)")
+        models = [writing] + [review] * (len(roles) - 1)
+
+    first = models[0] if state_keys else None
+    _save_last_provider(
+        provider,
+        first if provider in ("openai", "openai-oauth") else None,
+        first if provider in CATALOGUE_PROVIDERS else None,
+        state_file,
+        dict(zip(state_keys[1:], models[1:])),
+    )
+    return provider, config_path, models
+
+
 def run(
     provider: str,
     mode: str = "review",
@@ -453,51 +697,7 @@ def run(
     publish_kdp: bool = False,
     kdp_visible: bool = False,
 ) -> bool:
-    base_config_path = Path(PROVIDER_CONFIG_MAP[provider])
-    local_config_path = base_config_path.with_name(base_config_path.stem + ".local.json")
-    
-    if local_config_path.exists():
-        config_path = str(local_config_path)
-        print(f"Loaded local configuration: {local_config_path.name}")
-    else:
-        config_path = str(base_config_path)
-
-    os.environ["AI_CONFIG_PATH"] = config_path
-
-    openai_model = None
-    catalogue_model = None
-    if provider in ("openai", "openai-oauth"):
-        model_info = _load_openai_oauth_models() if provider == "openai-oauth" else None
-        options = tuple(model_info) if model_info is not None else OPENAI_MODEL_OPTIONS
-        default_model = _load_last_openai_model(
-            "gpt-5.6-terra" if provider == "openai-oauth" else None,
-            options,
-            "openai_oauth_model" if provider == "openai-oauth" else "openai_model",
-        )
-        openai_model = default_model if mode == "auto" else _prompt_openai_model(default_model, model_info)
-        os.environ["AI_WRITING_MODEL"] = openai_model
-        os.environ["AI_REVIEW_MODEL"] = openai_model
-        os.environ["AI_OPENAI_MODEL"] = openai_model
-    elif provider in CATALOGUE_PROVIDERS:
-        default_model = _load_last_catalogue_model(provider)
-        catalogue_model = default_model if mode == "auto" else _prompt_catalogue_model(provider, default_model)
-        _, max_out = _provider_models(provider)[catalogue_model]
-        os.environ["AI_WRITING_MODEL"] = catalogue_model
-        os.environ["AI_REVIEW_MODEL"] = catalogue_model
-        # The Claude Code CLI has no completion-token argument, so its catalogue
-        # carries max_output 0 and the caps stay unset.
-        for key in (
-            "AI_WRITING_COMPLETION_TOKENS",
-            "AI_REVIEW_COMPLETION_TOKENS",
-            "AI_PLANNING_COMPLETION_TOKENS",
-            "AI_DEFAULT_COMPLETION_TOKENS",
-        ):
-            if max_out:
-                os.environ[key] = str(max_out)
-            else:
-                os.environ.pop(key, None)
-
-    _save_last_provider(provider, openai_model, catalogue_model)
+    choose_ai(provider, mode)
 
     if fresh:
         if mode == "auto":
@@ -519,6 +719,9 @@ def run(
         else:
             _prepare_fresh_start()
 
+    creator = None
+    exit_on_ctrl_c(lambda: creator and creator.project_manager.save_project(),
+                   "Process interrupted by user. Progress has been saved.")
     while True:
         creator = AIBookCreator()
         completed = creator.create_book()
@@ -606,6 +809,7 @@ def main() -> None:
         if not author and args.mode == "review":
             author = input("Author name [AI Book Creator]: ").strip()
         os.environ["AI_BOOK_AUTHOR"] = author or "AI Book Creator"
+        os.environ["AI_MODELS_USED_PATH"] = str(PROJECT_OUTPUT_DIR / "models_used.json")
         if args.pages:
             os.environ["AI_BOOK_PAGE_RANGE"] = args.pages
         if args.chapters:

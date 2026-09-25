@@ -56,6 +56,7 @@ book writer/
   - OpenRouter
   - OpenCode Go
   - Claude Code CLI (`claude`) — runs on your Claude subscription, no API key
+  - Command Code CLI (`commandcode`) — runs on your Command Code subscription, no API key
   - hyper.charm.land (`hyper`) — OpenAI-compatible, `HYPER_API_KEY`
 
 ## Setup
@@ -86,10 +87,15 @@ line). The provider shells out to `claude -p` with the prompt on stdin, so
 generation is billed to your subscription rather than to a metered key. Model
 choice is `opus` / `sonnet` / `haiku`, or any full model id.
 
+For `commandcode`, install the Command Code CLI and sign in (`cmd` / `cmdc` on
+the command line). The provider shells out to `cmdc -p --output-format text`
+with the prompt on stdin, so generation is billed to your Command Code
+subscription. Model choices are full ids from the Command Code catalog, written
+lowercase in the config (`deepseek/deepseek-v4-pro`, `claude-sonnet-5`, ...).
+
 For `hyper`, put `HYPER_API_KEY=...` in `.env`. It is an OpenAI-compatible
-endpoint carrying several model families, which is what makes the humanness
-judges useful — a model from another family is the only one whose verdict on
-machine-written prose means anything.
+endpoint carrying several model families, allowing editorial comparisons with
+a model from another family. Reader comparisons remain the quality check.
 
 The repository already includes local provider config files in `ai_book_creator/config/`. Edit the `.local.json` file for the provider you want to use.
 
@@ -117,29 +123,64 @@ You can also switch providers by setting `AI_CONFIG_PATH` to one of the other lo
 - `ai_book_creator/config/ai_config_opencode_go.json`
 - `ai_book_creator/config/ai_config_opencode_zen.json` (free Zen models)
 - `ai_book_creator/config/ai_config_claude.json` (Claude Code CLI)
+- `ai_book_creator/config/ai_config_commandcode.json` (Command Code CLI)
 - `ai_book_creator/config/ai_config_hyper.json` (hyper.charm.land)
 
-## Humanness
+## Manuscript quality
 
-Chapters are scored against prose ranges measured on 48 published English
-novels (`ai_book_creator/config/prose_baseline.json`) and rewritten block by
-block until they read like one. Rebuild the baseline from your own Calibre
-library, or benchmark real novels against your generated chapters:
+Each chapter receives the approved identities and voice, a continuity record
+derived from all preceding finished chapters, and the previous chapter's ending.
+Chapter lengths follow scene scope and are scaled to the requested book total.
+Names in the approved layout remain fixed.
+
+Revisions use exact quoted passage replacements. Text outside those quotes stays
+unchanged. Edits must preserve headings and scene breaks, stay within length
+bounds, and win an editorial comparison in both A/B presentation orders while
+preserving events, character intention and established facts. Configured
+`judge_models` supply the comparison model; otherwise the review model does.
+These model judgments are fallible and do not replace reader feedback.
+
+First drafts are retained as `chapter_XX.draft.txt`. Replaced manuscript versions
+are saved in `revisions/`; live files are replaced atomically. Continuity records,
+edit proposals, comparison evidence and review progress are saved in project state.
+Budget interruptions can resume from the saved manuscript. Providers reporting
+truncated output are rejected; oversized requests no longer silently lose context.
+
+Step 3 reads every chapter, checks transitions, then reads the full manuscript in
+consecutive passages with a rolling editorial record. Quoted findings receive one
+bounded correction pass; changed manuscripts are analyzed again. Unresolved
+findings remain in `book_analysis.txt`. The review does not pad prose to meet a
+page count. A changed manuscript invalidates its export even when word counts match.
+
+Style statistics from `ai_book_creator/config/prose_baseline.json` are diagnostics,
+not authorship probabilities or literary-quality scores. Only individually flagged
+passages receive an extra inspection; no adverb, dialogue or sentence-length quotas
+are imposed. `AI_BOOK_HUMANIZE=0` disables this optional inspection.
+
+The shipped baseline is the legacy corpus measurement, unchanged by this update.
+For future calibration, the builder selects fiction using Calibre metadata and
+reserves books by title hash for evaluation. Correct missing/misleading library
+tags before rebuilding. All chapter/window measurements are regenerated together.
 
 ```bash
-python benchmarks/build_prose_baseline.py --books 60   # rebuild the baseline
-python benchmarks/measure_chapter_shape.py             # chapter-scale ranges
-python benchmarks/build_prose_baseline.py --bench      # novels vs your drafts
 python -m ai_book_creator.utils.humanizer book_output/chapter_01.txt
+python benchmarks/build_prose_baseline.py --books 60
+python benchmarks/build_prose_baseline.py --bench
 ```
 
-Measured on 2026-08-22 over 577 published chapters: real chapters score a median
-of 1.5, this pipeline's chapters 25.5. Each chapter is written to its own tempo,
-drawn from the corpus distribution rather than to one book-wide target, and the
-rewrite pass only asks for the specific things a chapter measurably lacks. Step
-3 reports whether the finished book varies chapter to chapter as much as a real
-novel does. `AI_BOOK_HUMANIZE=0` turns the whole thing off, and `judge_models`
-in the provider config adds cross-family LLM judges on top of the stylometry.
+Use the fixed synthetic cases to check a reader-evaluation workflow, then replace
+them with original/revised passages from your own runs. Include dialogue, action,
+interiority, transitions and endings. The pack hides revision labels and records
+reader preferences separately from content loss; it makes no model API calls.
+
+```bash
+python benchmarks/evaluate_prose.py benchmarks/prose_cases.json --output evaluation
+# Read evaluation/blind_review.md, fill evaluation/votes.json before opening the key.
+python benchmarks/evaluate_prose.py --votes evaluation/votes.json --key evaluation/key.json
+```
+
+Do not infer improved prose quality from a lower style score alone. Compare
+continuity, specificity, voice, emotional credibility and unnecessary explanation.
 
 Useful environment variables:
 
@@ -188,7 +229,7 @@ PYTHONPATH=. python -m ai_book_creator.project_cli list
 1. Step 0: Initialize the project scope, concept, page count, and initial layout
 2. Step 1: Build chapter structure and chapter plots
 3. Step 2: Write chapters to `book_output/`
-4. Step 3: Review and expand the manuscript if needed
+4. Step 3: Review the full manuscript and verify targeted corrections
 5. Step 4: Export the final EPUB
 6. Step 5: Create the cover and KDP upload package
 
@@ -304,3 +345,18 @@ PYTHONPATH=. python3 -m unittest test_publish_pipeline -v
 - The repo’s `__init__.py` only exposes the main public classes now; importing `ai_book_creator` no longer eagerly imports every step module.
 - `chapter_model.py` includes a lightweight fallback when `pydantic` is unavailable, which keeps the test suite importable in minimal environments.
 - `setup.py` is mainly a convenience script for local config management; the committed `.local.json` files are already usable as-is.
+
+## Shared AIService consumers
+
+Music writer and mathforge use the public `AIService` contract. Constructor options
+`allow_auth_prompt=False` and `client_max_retries=0` support unattended consumers;
+`set_reasoning_effort(writing, review)` controls effort by role without SDK wrapping.
+Responses requests carry the configured output cap as well as reasoning options.
+
+Metered requests sharing a ledger serialize with an OS lock; saves use atomic
+replacement. Corrupt/unwritable usage state raises `UsageStateError` and is never
+silently reset or retried as another paid generation. Restore verified accounting
+before resuming. Lock files release on process exit; do not delete an active lock.
+
+From the workspace root, check the contract and consumers with:
+`python -B check_workspace.py --project book-writer --project music-writer --project mathforge`.
