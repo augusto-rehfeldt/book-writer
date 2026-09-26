@@ -85,7 +85,7 @@ class PublishStepTests(unittest.TestCase):
 
         with (
             patch("ai_book_creator.cli.AIBookCreator", side_effect=[completed, stopped]) as creator,
-            patch("ai_book_creator.cli._save_last_provider"),
+            patch("ai_book_creator.cli.choose_ai"),
             patch("ai_book_creator.cli._has_previous_generated_artifacts", return_value=False),
             patch("ai_book_creator.cli._stash_previous_ebook_files", return_value=[]),
             patch("ai_book_creator.cli._clear_project_output"),

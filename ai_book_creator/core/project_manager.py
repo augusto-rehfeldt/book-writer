@@ -6,7 +6,7 @@ import os
 import json
 from datetime import datetime
 from typing import Dict, Any, Optional
-from ..utils.text_utils import save_text
+from ..utils.text_utils import detail, save_text
 
 
 STEP_SEQUENCE = [
@@ -81,7 +81,7 @@ class ProjectManager:
             }
             with open(checkpoint_file, 'w', encoding='utf-8') as f:
                 json.dump(checkpoint_data, f, indent=4, ensure_ascii=False)
-            print(f"📍 Checkpoint saved: {checkpoint_file}")
+            detail(f"📍 Checkpoint saved: {checkpoint_file}")
         except Exception as e:
             print(f"❌ Error saving checkpoint: {e}")
     

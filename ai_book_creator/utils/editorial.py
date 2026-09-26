@@ -2,7 +2,7 @@
 
 import re
 
-from .text_utils import ask_json, parse_json, text_chunks, text_digest
+from .text_utils import ask_json, detail, parse_json, text_chunks, text_digest
 
 
 EDITORIAL_CRITERIA = (
@@ -151,7 +151,7 @@ def update_continuity(ai_service, text: str, previous: str = "", title: str = ""
     memory = _condense(ai_service, previous, title) if previous else previous
     passages = list(text_chunks(text))
     for index, passage in enumerate(passages, 1):
-        print(f"    continuity passage {index}/{len(passages)}...")
+        detail(f"    continuity passage {index}/{len(passages)}...")
         prompt = (
             "Update a continuity record from this manuscript passage. Return JSON only: "
             '{"continuity": "record, at most 600 words"}. Preserve unresolved earlier '

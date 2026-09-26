@@ -2,6 +2,7 @@
 Main AIBookCreator class - orchestrates the entire book creation process
 """
 
+from ai_suite.service import DEFAULT_CONFIG_PATH
 import os
 import json
 import sys
@@ -34,7 +35,7 @@ class AIBookCreator:
         os.makedirs(self.output_dir, exist_ok=True)
         self.config_path = os.getenv(
             "AI_CONFIG_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_minimax.local.json"),
+            DEFAULT_CONFIG_PATH,
         )
         
         # Load configuration
@@ -333,12 +334,14 @@ class AIBookCreator:
                             candidate_titles[i] = f"{title} (Book {current_book + 1})"
                     chosen_title = candidate_titles[0]
         
-        print(f"\n📋 BOOK {current_book + 1} LAYOUT:")
-        print("-" * 50)
-        print(new_layout)
-        print("-" * 50)
+        if os.getenv("AI_BOOK_MODE", "review").strip().lower() == "auto":
+            print(f"📋 Book {current_book + 1} layout ready ({len(new_layout.split()):,} words)")
+        else:
+            print(f"\n📋 BOOK {current_book + 1} LAYOUT:")
+            print("-" * 50)
+            print(new_layout)
+            print("-" * 50)
 
-        if os.getenv("AI_BOOK_MODE", "review").strip().lower() != "auto":
             try:
                 feedback = input(
                     "\nPress Enter to accept this book layout, or type feedback to revise it: "

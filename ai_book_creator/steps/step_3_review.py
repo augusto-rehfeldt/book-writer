@@ -10,7 +10,7 @@ from ..core.project_manager import BrokenProjectStateError
 from ..models.chapter_model import Chapter
 from ..utils import humanizer
 from ..utils.editorial import edit_text, story_context, update_continuity
-from ..utils.text_utils import ask_json, calculate_page_count, calculate_word_count, save_text, text_chunks, text_digest
+from ..utils.text_utils import ask_json, calculate_page_count, calculate_word_count, is_auto, progress, save_text, text_chunks, text_digest
 
 
 class ReviewStep(BaseStep):
@@ -83,7 +83,10 @@ class ReviewStep(BaseStep):
             entry = cached.get(key, {})
             if (entry.get("source_hash") != text_digest(chapter.content)
                     or entry.get("context_hash") != context_hash):
-                print(f"Reviewing all of chapter {chapter.chapter_number}: {chapter.title}")
+                if is_auto():
+                    progress("Review", index + 1, len(ordered), chapter.title)
+                else:
+                    print(f"Reviewing all of chapter {chapter.chapter_number}: {chapter.title}")
                 plot = self.project_manager.get_chapter_plot(chapter.chapter_number) or {}
                 instructions = (
                     "Check scene causality, character knowledge, motivation, voice and transitions. "

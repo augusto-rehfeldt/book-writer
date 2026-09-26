@@ -9,8 +9,8 @@ tests/*
 !tests/test_editorial_pipeline.py
 !tests/test_humanizer.py
 !tests/test_chapter_budget.py
-!tests/test_service_contract.py
-!tests/test_shared_*.py
+!tests/test_model_credits.py
+!tests/test_cli_archive.py
 !tests/test_auto_publish.py
 benchmarks/*
 !benchmarks/evaluate_prose.py

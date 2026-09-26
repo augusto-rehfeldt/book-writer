@@ -375,6 +375,9 @@ class InitStep(BaseStep):
             },
         )
         series_layout = self.ai_service.generate_content(prompt, max_completion_tokens=32000)
+        if self._is_auto():
+            print(f"📚 Series layout ready ({len(series_layout.split()):,} words)")
+            return series_layout
         print("\n📚 SERIES LAYOUT:")
         print("-" * 50)
         print(series_layout)
@@ -501,10 +504,7 @@ class InitStep(BaseStep):
         layout = self.ai_service.generate_content(prompt, max_completion_tokens=8000)
 
         if self._is_auto():
-            print("\n📋 AUTOMATIC BOOK LAYOUT:")
-            print("-" * 50)
-            print(layout)
-            print("-" * 50)
+            print(f"📋 Book layout ready ({len(layout.split()):,} words)")
             return layout
 
         # Step 2: Interactive review of Layout
@@ -632,6 +632,10 @@ class InitStep(BaseStep):
         series_mode: bool,
         series_book_count: int,
     ) -> None:
+        if self._is_auto():
+            print(f"📈 {target_word_count:,} words, {estimate['chapter_count']} chapters, "
+                  f"~{estimate['run_total_tokens']:,} tokens this run")
+            return
         print("\n📈 Estimated token usage:")
         if series_mode:
             print(f"Series size: {series_book_count} books")

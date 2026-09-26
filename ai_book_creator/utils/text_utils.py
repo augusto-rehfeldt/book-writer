@@ -6,6 +6,8 @@ import hashlib
 import json
 import os
 import re
+import shutil
+import sys
 import tempfile
 from pathlib import Path
 
@@ -73,6 +75,33 @@ def text_digest(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def is_auto() -> bool:
+    return os.getenv("AI_BOOK_MODE", "review").strip().lower() == "auto"
+
+
+def detail(message: str) -> None:
+    """Chatty progress line: shown in review mode, dropped in auto mode."""
+    if not is_auto():
+        print(message)
+
+
+def progress_bar(done: int, total: int, width: int = 20) -> str:
+    filled = width * done // max(1, total)
+    return f"[{'#' * filled}{'.' * (width - filled)}] {done}/{total}"
+
+
+def progress(label: str, done: int, total: int, item: str = "") -> None:
+    """Compact bar, redrawn in place on a console; one line per update otherwise."""
+    line = f"{label} {progress_bar(done, total)} {item}".rstrip()
+    if not sys.stdout.isatty():
+        print(line, flush=True)
+        return
+    # Pad to the console width so a shorter title wipes the longer one before it;
+    # never wrap, or the carriage return only rewinds the last row.
+    width = shutil.get_terminal_size().columns - 1
+    print("\r" + line[:width].ljust(width), end="\n" if done >= total else "", flush=True)
+
+
 def save_text(filename: str, text: str, *, keep_history: bool = True) -> None:
     """Keep prior manuscript versions and replace the live file atomically."""
     path = Path(filename)
@@ -106,4 +135,7 @@ if __name__ == "__main__":
     assert calculate_page_count(250) == 1
     assert calculate_page_count(251) == 2
     assert pages_to_words(2) == 500
+    assert progress_bar(0, 4, 4) == "[....] 0/4"
+    assert progress_bar(2, 4, 4) == "[##..] 2/4"
+    assert progress_bar(1, 0, 4) == "[####] 1/0"
     print("ok")

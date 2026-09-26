@@ -2,6 +2,7 @@
 Step 2: Write Chapters - Generate complete chapter text
 """
 
+from ai_suite.service import DEFAULT_CONFIG_PATH
 import os
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from ..core.project_manager import BrokenProjectStateError
 from ..utils import humanizer
 from ..utils.editorial import (REVISION_CHECKS, edit_text, indistinct_lines, story_context,
                                update_continuity, voice_bible)
-from ..utils.text_utils import calculate_word_count, calculate_page_count, save_text, text_digest
+from ..utils.text_utils import calculate_word_count, calculate_page_count, detail, is_auto, progress, save_text, text_digest
 
 
 AUTHORIAL_PROSE_GUIDANCE = """Write from a particular consciousness. Let the viewpoint character notice what this person would notice and miss what this person would miss, misremember things, and hold opinions the narration does not correct. Use exact physical details, exact quantities and prices, and the names this world gives its things: foods, songs, makers, streets, sayings. A generic noun where the world has a name is a missed detail, and so is a recurring person known only by role. Work details into the sentences where the action happens; do not list them as stand-alone fragments. Tell what people do, not a string of what they did not do, and contract negation the way people talk and think (didn't, wasn't) unless the voice is formal.
@@ -37,7 +38,7 @@ class WriteStep(BaseStep):
     def _load_config(self):
         config_path = os.getenv(
             "AI_CONFIG_PATH",
-            os.path.join(os.path.dirname(__file__), "..", "config", "ai_config_minimax.local.json"),
+            DEFAULT_CONFIG_PATH,
         )
         with open(config_path, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -88,12 +89,12 @@ class WriteStep(BaseStep):
             self.project_manager.save_project()
 
         memory, previous_ending = "", ""
-        for chapter_key, chapter_data in sorted(
-                chapter_plots.items(), key=lambda item: item[1]["chapter_number"]):
+        for position, (chapter_key, chapter_data) in enumerate(sorted(
+                chapter_plots.items(), key=lambda item: item[1]["chapter_number"]), 1):
             existing_chapter = written_chapters.get(chapter_key)
             existing_filename = existing_chapter.get("filename") if existing_chapter else None
             if existing_chapter and existing_filename and os.path.exists(existing_filename):
-                print(f"\nSkipping already cached {chapter_data['title']}...")
+                detail(f"\nSkipping already cached {chapter_data['title']}...")
                 text = Path(existing_filename).read_text(encoding="utf-8")
                 if not text.strip():
                     raise BrokenProjectStateError(f"Empty saved chapter: {existing_filename}")
@@ -104,7 +105,7 @@ class WriteStep(BaseStep):
                           else "earlier chapters' record changed"
                           if existing_chapter.get("context_hash") != context_hash else "")
                 if reason:
-                    print(f"  Rebuilding continuity record ({reason})...")
+                    detail(f"  Rebuilding continuity record ({reason})...")
                     existing_chapter["continuity"] = update_continuity(
                         self.ai_service, text, memory, chapter_data["title"])
                     existing_chapter["source_hash"] = text_digest(text)
@@ -114,7 +115,7 @@ class WriteStep(BaseStep):
                 previous_ending = text[-2500:]
                 existing_chapter["word_count"] = calculate_word_count(text)
                 if self.glossary_manager and existing_chapter.get("glossary_hash") != text_digest(text):
-                    print("  Updating glossary from chapter...")
+                    detail("  Updating glossary from chapter...")
                     self.glossary_manager.auto_populate_from_chapter(text, chapter_data["title"], self.ai_service)
                     existing_chapter["glossary_hash"] = text_digest(text)
                     changed = True
@@ -127,7 +128,10 @@ class WriteStep(BaseStep):
                     self.project_manager.save_project()
                 continue
 
-            print(f"\nWriting {chapter_data['title']} (First Draft)...")
+            if is_auto():
+                progress("Writing", position, len(chapter_plots), chapter_data['title'])
+            else:
+                print(f"\nWriting {chapter_data['title']} (First Draft)...")
 
             # Step 1 hands every chapter its own budget, uneven on purpose. A short
             # one must not be floored back up to the book average.
@@ -197,7 +201,7 @@ class WriteStep(BaseStep):
                                  "total_word_count": total_word_count + word_count})
             self.project_manager.save_project()
             context_hash = text_digest(memory)
-            print("  Updating continuity record...")
+            detail("  Updating continuity record...")
             memory = update_continuity(self.ai_service, text, memory, chapter_data["title"])
             previous_ending = text[-2500:]
 
@@ -216,7 +220,7 @@ class WriteStep(BaseStep):
             total_word_count += word_count
             
             if self.glossary_manager:
-                print("  Updating glossary from chapter...")
+                detail("  Updating glossary from chapter...")
                 self.glossary_manager.auto_populate_from_chapter(
                     text, chapter_data['title'], self.ai_service
                 )

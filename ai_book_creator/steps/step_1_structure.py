@@ -10,6 +10,7 @@ from .base_step import BaseStep
 from ..core.project_manager import BrokenProjectStateError
 from ..utils import humanizer
 from ..utils.name_generator import generate_name_pools
+from ..utils.text_utils import detail, is_auto, progress
 
 
 def chapter_budget(estimates: List[int], total_words: int) -> List[int]:
@@ -463,10 +464,13 @@ class StructureStep(BaseStep):
             chapter_number = int(chapter.get("chapter_number", i))
             chapter_key = f"chapter_{chapter_number}"
             if chapter_key in chapter_plots:
-                print(f"Skipping already cached plot for Chapter {chapter_number}...")
+                detail(f"Skipping already cached plot for Chapter {chapter_number}...")
                 continue
 
-            print(f"Creating plot for Chapter {chapter_number}: {chapter.get('title', f'Chapter {chapter_number}')}")
+            if is_auto():
+                progress("Plots", i, len(chapters), chapter.get('title', ''))
+            else:
+                print(f"Creating plot for Chapter {chapter_number}: {chapter.get('title', f'Chapter {chapter_number}')}")
 
             budget = int(chapter.get("word_count_estimate", 1500))
             events = "1-2 key events" if budget < 1200 else "2-3 key events" if budget < 2500 else "3-5 key events"

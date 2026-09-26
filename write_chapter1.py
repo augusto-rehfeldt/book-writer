@@ -15,9 +15,6 @@ from collections import deque
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent
-BASE_CONFIG_PATH = REPO_ROOT / "ai_book_creator" / "config" / "ai_config_opencode_go.json"
-LOCAL_CONFIG_PATH = BASE_CONFIG_PATH.with_name("ai_config_opencode_go.local.json")
-CONFIG_PATH = str(LOCAL_CONFIG_PATH if LOCAL_CONFIG_PATH.exists() else BASE_CONFIG_PATH)
 OUTPUT_DIR = REPO_ROOT / "book_output" / "chapter1_run"
 
 BOOK_IDEA = (
@@ -68,7 +65,11 @@ def _clear_output():
 
 def main() -> None:
     os.chdir(REPO_ROOT)
-    os.environ["AI_CONFIG_PATH"] = CONFIG_PATH
+    # The shared suite's opencode-go config (its .local.json copy first).
+    from ai_book_creator.cli import provider_config_path
+
+    config_path = provider_config_path("opencode-go")
+    os.environ["AI_CONFIG_PATH"] = config_path
     os.environ["AI_WRITING_MODEL"] = "glm-5.2"
     os.environ["AI_REVIEW_MODEL"] = "glm-5.2"
 
@@ -86,7 +87,7 @@ def main() -> None:
     output_dir = str(OUTPUT_DIR)
     project_manager = ProjectManager(output_dir)
     ai_service = AIService(
-        config_path=CONFIG_PATH,
+        config_path=config_path,
         usage_state_path=os.path.join(output_dir, "ai_usage_state.json"),
     )
     glossary_manager = GlossaryManager(output_dir)
