@@ -84,8 +84,10 @@ OpenCode account key (from `opencode auth login`) is reused automatically.
 
 For `claude`, install the Claude Code CLI and sign in (`claude` on the command
 line). The provider shells out to `claude -p` with the prompt on stdin, so
-generation is billed to your subscription rather than to a metered key. Model
-choice is `opus` / `sonnet` / `haiku`, or any full model id.
+generation is billed to your subscription rather than to a metered key. The menu
+lists `claude-opus-5-5` (default), `claude-fable-5-1`, `claude-sonnet-5`,
+`claude-haiku-4-5-20251001` and the `opus` / `sonnet` / `haiku` aliases (always
+the latest of each); any full model id also works.
 
 For `commandcode`, install the Command Code CLI and sign in (`cmd` / `cmdc` on
 the command line). The provider shells out to `cmdc -p --output-format text`
