@@ -66,7 +66,7 @@ class ProjectManager:
             
             save_text(self.project_file, json.dumps(self.book_data, indent=4, ensure_ascii=False),
                       keep_history=False)
-            print(f"💾 Project state saved successfully to {self.project_file}")
+            detail(f"💾 Project state saved successfully to {self.project_file}")
         except Exception as e:
             print(f"❌ Error saving project data: {e}")
             raise

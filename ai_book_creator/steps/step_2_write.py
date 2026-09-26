@@ -183,6 +183,7 @@ class WriteStep(BaseStep):
                     rounds=int(self.config.get("humanize_rounds", 2)),
                     threshold=float(self.config.get("humanize_threshold", 15.0)),
                     context=context,
+                    log=detail,
                 )
             word_count = calculate_word_count(text)
             
