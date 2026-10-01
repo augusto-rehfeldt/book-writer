@@ -199,7 +199,8 @@ def run(
     retry_wait: int = 900,
     publish: str = "",
 ) -> bool:
-    choose_ai(provider, "review" if ask_models else mode)
+    # Two roles: the review stages (model_type="review") get their own model and effort.
+    choose_ai(provider, "review" if ask_models else mode, roles=("writing", "review"))
     publish = publish or ("kdp" if publish_kdp else "")
 
     if resume and not PROJECT_STATE_FILE.exists():

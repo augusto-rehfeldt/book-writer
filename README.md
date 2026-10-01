@@ -197,6 +197,8 @@ Useful environment variables:
 - `AI_GROQ_RATE_STATE_PATH`
 - `AI_WRITING_MODEL`
 - `AI_REVIEW_MODEL`
+- `AI_WRITING_EFFORT`
+- `AI_REVIEW_EFFORT`
 - `AI_BASE_URL`
 
 ## Running the app
@@ -279,7 +281,12 @@ Each completed KDP package is archived under `book_output/archive/ebooks/`
 before the next book starts. If a run is interrupted or rejected by the
 provider, its current progress remains resumable.
 
-Hands-off modes ask only for the provider and models, then decide everything
+The menu asks for a writing model and a review model (continuity, speaker and
+manuscript checks, glossary), each followed by a reasoning-effort menu when the
+model lists effort levels. The review picks start on the writing ones, so pressing
+Enter keeps one model for both. `--mode auto` reuses the remembered picks.
+
+Hands-off modes ask only for the provider, models and efforts, then decide everything
 else themselves: the AI invents the idea, chooses a standalone or a 2-5 book
 series, picks plot direction, title, length and chapters:
 

@@ -34,9 +34,11 @@ class FlagTests(unittest.TestCase):
     def test_resume_without_project_fails(self):
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(cli, "PROJECT_STATE_FILE", Path(directory) / "missing.json"), \
-                patch.object(cli, "choose_ai"):
+                patch.object(cli, "choose_ai") as choose:
             with self.assertRaises(ValueError):
                 cli.run("openrouter", "auto", resume=True)
+        # The review stages get a model and effort of their own, picked in the same menu.
+        self.assertEqual(choose.call_args.kwargs["roles"], ("writing", "review"))
 
 
 class IdeaTests(unittest.TestCase):

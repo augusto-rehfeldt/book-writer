@@ -36,7 +36,9 @@ carries a vendored `ai_suite/` copy for fresh clones -- never edit it here; chan
 and run its `sync.py`. `ai_book_creator/__init__.py` puts the sibling checkout first on
 `sys.path`; `ai_book_creator.services.ai_service` and `ai_book_creator.env` alias the suite
 modules and `cli` re-exports `choose_ai`/`provider_config_path` for older importers
-(article-writer). Book writer passes its own `book_output/provider_state.json` to the menu.
+(article-writer). Book writer passes its own `book_output/provider_state.json` to the menu
+and asks for two roles, `writing` and `review`: a model and a reasoning effort each, the
+review ones used by every `model_type="review"` call.
 Tests that run `cli.run` must stub `cli.choose_ai`, or they write the real state file.
 
 ## Editorial pipeline

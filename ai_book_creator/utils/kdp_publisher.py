@@ -886,7 +886,7 @@ if __name__ == "__main__":
     from .. import cli
 
     # The last provider picks categories from KDP's live list, as a normal run does.
-    cli.choose_ai(None, "auto")
+    cli.choose_ai(None, "auto", roles=("writing", "review"))
     service = cli.AIBookCreator().ai_service
     failed = []
     for path in [arg for arg in sys.argv[1:] if arg != "--visible"]:

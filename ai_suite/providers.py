@@ -19,7 +19,8 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.request import Request, urlopen
 
-from .service import ensure_openai_oauth_proxy, load_opencode_go_sync, background_process_options
+from .service import (EFFORT_PROVIDERS, ensure_openai_oauth_proxy, load_opencode_go_sync,
+                      background_process_options)
 
 
 PACKAGE_ROOT = Path(__file__).resolve().parent
@@ -944,6 +945,32 @@ def _prompt_catalogue_model(provider: str, default_model: str, role: str = "") -
     return _pick_model(label, rows, default_model, role, paid_by)
 
 
+def _effort_levels(provider: str, mid: str) -> list[str]:
+    """Reasoning efforts models.dev lists for the model; [] when it lists none or the
+    provider's transport cannot send one."""
+    if provider == "gpt4free":
+        # ponytail: its facts are a fuzzy name match and whether the g4f server forwards
+        # an effort is unchecked; offer levels once a live request confirms it.
+        return []
+    with open(provider_config_path(provider), "r", encoding="utf-8") as f:
+        if str(json.load(f).get("provider", "")).lower() not in EFFORT_PROVIDERS:
+            return []
+    for option in _models_dev_facts(provider, mid).get("reasoning_options") or ():
+        if option.get("type") == "effort":
+            return [str(level) for level in option.get("values") or ()]
+    return []
+
+
+def _prompt_effort(levels: list[str], default: str, role: str = "") -> str:
+    """Arrow-key effort menu: the model's own levels, or "" for the provider's default."""
+    name = f"{role.capitalize()} effort" if role else "Effort"
+    rows = [("default", "default  the provider's own")] + [(level, level) for level in levels]
+    # ponytail: asked on a console only. Off one the remembered pick stands, because a
+    # typed prompt here would eat the next scripted answer of a piped run.
+    picked = _arrow_menu(name, rows, default or "default", name=name)
+    return default if picked is None else "" if picked == "default" else picked
+
+
 
 
 def provider_options() -> dict[str, dict]:
@@ -986,6 +1013,7 @@ def choose_ai(
     roles: tuple[str, ...] = ("writing",),
     defaults: tuple[str, ...] = (),
     default_provider: str = "google",
+    effort: bool = True,
 ) -> tuple[str, str, list[str]]:
     """Provider and model menu shared by every script that uses AIService.
 
@@ -994,7 +1022,9 @@ def choose_ai(
     each of them. Asks for the provider unless one is given, then one model per
     role (the first role writes, the last reviews). mode="auto" asks nothing and
     reuses the picks remembered in state_file (default: PROVIDER_STATE_FILE).
-    Exports AI_CONFIG_PATH, the role models and completion caps; returns
+    Each model that lists reasoning efforts then gets an effort menu of its own
+    levels; effort=False skips it for a caller with its own effort option.
+    Exports AI_CONFIG_PATH, the role models, efforts and completion caps; returns
     (provider, config path, models).
     """
     if provider is None:
@@ -1025,7 +1055,8 @@ def choose_ai(
         base_key = "openai_oauth_model" if provider == "openai-oauth" else "openai_model"
         for i, role in enumerate(roles):
             key = base_key if i == 0 else f"{base_key}_{role}"
-            fallback = defaults[i] if i < len(defaults) else (
+            # A role with no pick of its own yet starts on the first role's.
+            fallback = defaults[i] if i < len(defaults) else models[0] if i else (
                 "gpt-6-sol" if provider == "openai-oauth" else None)
             default_model = _load_last_openai_model(fallback, options, key, state_file)
             models.append(default_model if mode == "auto"
@@ -1038,7 +1069,7 @@ def choose_ai(
     elif provider in CATALOGUE_PROVIDERS:
         for i, role in enumerate(roles):
             key = _model_state_key(provider) + ("" if i == 0 else f"_{role}")
-            fallback = defaults[i] if i < len(defaults) else None
+            fallback = defaults[i] if i < len(defaults) else models[0] if i else None
             default_model = _load_last_catalogue_model(provider, fallback, key, state_file)
             models.append(default_model if mode == "auto"
                           else _prompt_catalogue_model(provider, default_model, label(role)))
@@ -1069,12 +1100,36 @@ def choose_ai(
             print(f"Model {mid}: {_facts_label(_model_facts(provider, mid))} ($ per 1M in/out)")
         models = [writing] + [review] * (len(roles) - 1)
 
+    # One effort per role, from the levels that role's model lists; AIService reads the
+    # first as the writing effort and the last as the review effort.
+    saved = _load_provider_state(state_file)
+    efforts: list[str] = []
+    answered: dict[str, str] = {}  # only an answered menu is remembered
+    for i, (role, mid) in enumerate(zip(roles, models)):
+        key = f"{provider.replace('-', '_')}_effort" + ("" if i == 0 else f"_{role}")
+        # Like the models: a role with no remembered effort starts on the first role's.
+        last = str(saved[key] if key in saved else efforts[0] if efforts else "")
+        picked = ""
+        # Auto mode with nothing remembered never loads models.dev.
+        if effort and mid and (mode != "auto" or last):
+            levels = _effort_levels(provider, mid)
+            # models.dev unreachable says nothing about the model: the remembered effort stands.
+            picked = last if last in levels or not _models_dev() else ""
+            if levels and mode != "auto":
+                picked = answered[key] = _prompt_effort(levels, picked, label(role))
+        efforts.append(picked)
+    for name, picked in (("AI_WRITING_EFFORT", efforts[0]), ("AI_REVIEW_EFFORT", efforts[-1])):
+        if picked:
+            os.environ[name] = picked
+        else:
+            os.environ.pop(name, None)
+
     first = models[0] if state_keys else None
     _save_last_provider(
         provider,
         first if provider in ("openai", "openai-oauth") else None,
         first if provider in CATALOGUE_PROVIDERS else None,
         state_file,
-        dict(zip(state_keys[1:], models[1:])),
+        {**dict(zip(state_keys[1:], models[1:])), **answered},
     )
     return provider, config_path, models
