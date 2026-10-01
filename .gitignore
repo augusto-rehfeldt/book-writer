@@ -6,6 +6,7 @@ __pycache__/
 *.py[cod]
 *.pyc
 tests/*
+!tests/test_continuity_progress.py
 !tests/test_editorial_pipeline.py
 !tests/test_humanizer.py
 !tests/test_chapter_budget.py

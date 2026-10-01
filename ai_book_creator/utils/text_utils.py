@@ -90,8 +90,8 @@ def progress_bar(done: int, total: int, width: int = 20) -> str:
     return f"[{'#' * filled}{'.' * (width - filled)}] {done}/{total}"
 
 
-def progress(label: str, done: int, total: int, item: str = "") -> None:
-    """Compact bar, redrawn in place on a console; one line per update otherwise."""
+def progress(label: str, done: int, total: int, item: str = "", *, complete: bool = True) -> None:
+    """Redraw a console bar; complete=False keeps the final item open for updates."""
     line = f"{label} {progress_bar(done, total)} {item}".rstrip()
     if not sys.stdout.isatty():
         print(line, flush=True)
@@ -99,7 +99,7 @@ def progress(label: str, done: int, total: int, item: str = "") -> None:
     # Pad to the console width so a shorter title wipes the longer one before it;
     # never wrap, or the carriage return only rewinds the last row.
     width = shutil.get_terminal_size().columns - 1
-    print("\r" + line[:width].ljust(width), end="\n" if done >= total else "", flush=True)
+    print("\r" + line[:width].ljust(width), end="\n" if complete and done >= total else "", flush=True)
 
 
 def save_text(filename: str, text: str, *, keep_history: bool = True) -> None:

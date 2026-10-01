@@ -105,9 +105,10 @@ class WriteStep(BaseStep):
                           else "earlier chapters' record changed"
                           if existing_chapter.get("context_hash") != context_hash else "")
                 if reason:
-                    detail(f"  Rebuilding continuity record ({reason})...")
+                    self._status(position, len(chapter_plots), chapter_data["title"], f"Rebuilding continuity ({reason})")
                     existing_chapter["continuity"] = update_continuity(
-                        self.ai_service, text, memory, chapter_data["title"])
+                        self.ai_service, text, memory, chapter_data["title"],
+                        ("Writing", position, len(chapter_plots)))
                     existing_chapter["source_hash"] = text_digest(text)
                     existing_chapter["context_hash"] = context_hash
                     changed = True
@@ -115,7 +116,7 @@ class WriteStep(BaseStep):
                 previous_ending = text[-2500:]
                 existing_chapter["word_count"] = calculate_word_count(text)
                 if self.glossary_manager and existing_chapter.get("glossary_hash") != text_digest(text):
-                    detail("  Updating glossary from chapter...")
+                    self._status(position, len(chapter_plots), chapter_data["title"], "Updating glossary")
                     self.glossary_manager.auto_populate_from_chapter(text, chapter_data["title"], self.ai_service)
                     existing_chapter["glossary_hash"] = text_digest(text)
                     changed = True
@@ -129,7 +130,7 @@ class WriteStep(BaseStep):
                 continue
 
             if is_auto():
-                progress("Writing", position, len(chapter_plots), chapter_data['title'])
+                progress("Writing", position, len(chapter_plots), chapter_data['title'], complete=False)
             else:
                 print(f"\nWriting {chapter_data['title']} (First Draft)...")
 
@@ -203,7 +204,9 @@ class WriteStep(BaseStep):
             self.project_manager.save_project()
             context_hash = text_digest(memory)
             detail("  Updating continuity record...")
-            memory = update_continuity(self.ai_service, text, memory, chapter_data["title"])
+            memory = update_continuity(
+                self.ai_service, text, memory, chapter_data["title"],
+                ("Writing", position, len(chapter_plots)))
             previous_ending = text[-2500:]
 
             written_chapters[chapter_key] = {
@@ -221,7 +224,7 @@ class WriteStep(BaseStep):
             total_word_count += word_count
             
             if self.glossary_manager:
-                detail("  Updating glossary from chapter...")
+                self._status(position, len(chapter_plots), chapter_data["title"], "Updating glossary")
                 self.glossary_manager.auto_populate_from_chapter(
                     text, chapter_data['title'], self.ai_service
                 )
@@ -262,6 +265,14 @@ class WriteStep(BaseStep):
         self.save_step_data(written_data)
         self.mark_completed()
         return written_data
+
+    @staticmethod
+    def _status(position, total, title, message):
+        """Name the slow model call; auto mode would otherwise sit on a silent bar."""
+        if is_auto():
+            progress("Writing", position, total, f"{title} | {message}", complete=False)
+        else:
+            print(f"  {message}...")
 
     def _build_chapter_prompt(
         self,

@@ -2,7 +2,7 @@
 
 import re
 
-from .text_utils import ask_json, detail, parse_json, text_chunks, text_digest
+from .text_utils import ask_json, detail, is_auto, progress, parse_json, text_chunks, text_digest
 
 
 EDITORIAL_CRITERIA = (
@@ -119,7 +119,7 @@ def _ask_record(ai_service, prompt: str, title: str) -> str:
         model_type="review", max_completion_tokens=2048)["continuity"].strip()
 
 
-def _condense(ai_service, memory: str, title: str) -> str:
+def _condense(ai_service, memory: str, title: str, notify=print) -> str:
     """Shrink an oversized record by editing it, not by re-reading the passage.
 
     Re-asking the extraction prompt regenerates a record of the same length;
@@ -141,17 +141,24 @@ def _condense(ai_service, memory: str, title: str) -> str:
     # under the target keeps its shortest attempt rather than halting the book.
     # The 2048-token reply cap bounds how large it can grow.
     if len(shortest.split()) > 900:
-        print(f"  Continuity record for {title} kept at {len(shortest.split())} words "
+        notify(f"Continuity kept at {len(shortest.split())} words: {title} "
               "(model could not condense further)")
     return shortest
 
 
-def update_continuity(ai_service, text: str, previous: str = "", title: str = "") -> str:
+def update_continuity(ai_service, text: str, previous: str = "", title: str = "", progress_context=None) -> str:
     """Read every passage, carrying forward a compact factual record."""
-    memory = _condense(ai_service, previous, title) if previous else previous
+    def notify(message):
+        if is_auto() and progress_context:
+            prefix = f"{progress_context[3]} | " if len(progress_context) > 3 else ""
+            progress(*progress_context[:3], prefix + message.strip(), complete=False)
+        else:
+            print(message)
+
+    memory = _condense(ai_service, previous, title, notify) if previous else previous
     passages = list(text_chunks(text))
     for index, passage in enumerate(passages, 1):
-        detail(f"    continuity passage {index}/{len(passages)}...")
+        notify(f"Continuity passage {index}/{len(passages)}: {title}")
         prompt = (
             "Update a continuity record from this manuscript passage. Return JSON only: "
             '{"continuity": "record, at most 600 words"}. Preserve unresolved earlier '
@@ -162,7 +169,7 @@ def update_continuity(ai_service, text: str, previous: str = "", title: str = ""
             "Keep the record factual, with no critique or invented explanations.\n\n"
             f"PREVIOUS RECORD:\n{memory}\n\nCHAPTER: {title}, passage {index}\n{passage}"
         )
-        memory = _condense(ai_service, _ask_record(ai_service, prompt, title), title)
+        memory = _condense(ai_service, _ask_record(ai_service, prompt, title), title, notify)
     return memory
 
 

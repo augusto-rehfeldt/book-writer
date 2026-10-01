@@ -197,6 +197,107 @@ class CoverageTests(unittest.TestCase):
 
 
 class ResumeTests(unittest.TestCase):
+    def test_review_progress_includes_valid_cache_and_pending_continuity(self):
+        for stale in (None, "source_hash", "context_hash"):
+            with self.subTest(stale=stale), tempfile.TemporaryDirectory() as directory:
+                pm = ProjectManager(directory)
+                chapters, cached = {}, {}
+                memory, ending = "", ""
+                for number in range(1, 4):
+                    key = f"chapter_{number}"
+                    path = Path(directory) / f"chapter_{number:02}.txt"
+                    path.write_text(PROSE, encoding="utf-8")
+                    chapters[key] = {"filename": str(path), "title": f"Part {number}",
+                                     "chapter_number": number, "word_count": len(PROSE.split())}
+                    if number < 3:
+                        cached[key] = {
+                            "source_hash": text_digest(PROSE),
+                            "context_hash": text_digest(editorial.story_context({}, memory)
+                                                        + f"\nPREVIOUS ENDING:\n{ending}"),
+                            "findings": [],
+                        }
+                        if number == 1:
+                            cached[key]["continuity"] = "Alice waits."
+                    memory, ending = "Alice waits.", PROSE[-2500:]
+                if stale:
+                    cached["chapter_2"][stale] = "outdated"
+                pm.book_data = {"written": {"chapters": chapters},
+                                "reviewed": {"chapter_reviews": cached}}
+                step = ReviewStep(Mock(), pm, directory)
+                module = "ai_book_creator.steps.step_3_review"
+                with patch(module + ".is_auto", return_value=True), \
+                     patch(module + ".progress") as display, \
+                     patch(module + ".edit_text", return_value=(PROSE, [])) as edit, \
+                     patch(module + ".update_continuity", return_value="Alice waits.") as continuity, \
+                     patch.object(step, "_generate_analysis", return_value={"analysis": "Done", "issues": []}), \
+                     patch.object(humanizer, "enabled", return_value=False):
+                    def check_progress(*args):
+                        if continuity.call_count > 1:
+                            return "Alice waits."
+                        display.assert_called()
+                        self.assertEqual(display.call_args.args[1], 2)
+                        self.assertIn("1 cached" if stale else "2 cached", display.call_args.args[3])
+                        if not stale:
+                            self.assertIn("continuity pending", display.call_args.args[3])
+                        return "Alice waits."
+                    # Check the visible status before the first resumed AI work.
+                    continuity.side_effect = check_progress
+                    step.execute()
+                self.assertEqual([c.args[1] for c in display.call_args_list], [1, 2, 3])
+                self.assertIn("1 cached", display.call_args_list[0].args[3])
+                self.assertIn("1 cached" if stale else "2 cached", display.call_args.args[3])
+                self.assertEqual(edit.call_count, 2 if stale else 1)
+                self.assertEqual(continuity.call_count, 2)
+
+    def test_review_resume_skips_finished_repairs_and_refresh(self):
+        with tempfile.TemporaryDirectory() as directory:
+            pm = ProjectManager(directory)
+            chapters, cached = {}, {}
+            memory, ending = "", ""
+            for number in range(1, 4):
+                key = f"chapter_{number}"
+                path = Path(directory) / f"chapter_{number:02}.txt"
+                path.write_text(PROSE, encoding="utf-8")
+                chapters[key] = {"filename": str(path), "title": f"Part {number}",
+                                 "chapter_number": number, "word_count": len(PROSE.split())}
+                cached[key] = {"source_hash": text_digest(PROSE), "findings": [],
+                               "continuity": "Alice waits.",
+                               "context_hash": text_digest(editorial.story_context({}, memory)
+                                                           + f"\nPREVIOUS ENDING:\n{ending}")}
+                memory, ending = "Alice waits.", PROSE[-2500:]
+            pm.book_data = {"written": {"chapters": chapters}, "reviewed": {"chapter_reviews": cached}}
+            issues = [{"chapter_number": n, "quote": "put the blue key", "problem": "p", "fix": "f"}
+                      for n in (1, 2)]
+            revised = PROSE.replace("put the blue key", "slipped the blue key")
+            module = "ai_book_creator.steps.step_3_review"
+
+            def run(edit_effect, continuity_effect):
+                step = ReviewStep(Mock(), pm, directory)
+                with patch(module + ".edit_text", side_effect=edit_effect) as edit, \
+                     patch(module + ".update_continuity", side_effect=continuity_effect) as continuity, \
+                     patch.object(step, "_generate_analysis",
+                                  return_value={"analysis": "Done", "issues": issues}) as analysis, \
+                     patch.object(humanizer, "enabled", return_value=False):
+                    try:
+                        step.execute()
+                    except RuntimeError:
+                        pass
+                return edit, continuity, analysis
+
+            # Chapter 1 repaired, chapter 2's repair is interrupted.
+            edit, _, analysis = run([(revised, []), RuntimeError()], [])
+            self.assertEqual((edit.call_count, analysis.call_count), (2, 1))
+            # Chapter 2 repaired; refresh reads chapter 1 and is interrupted on chapter 2.
+            edit, continuity, analysis = run([(revised, [])], ["Refreshed.", RuntimeError()])
+            self.assertEqual((edit.call_count, continuity.call_count, analysis.call_count), (1, 2, 0))
+            # Only chapters 2 and 3 are refreshed, then the final analysis runs.
+            edit, continuity, analysis = run([], ["Refreshed.", "Refreshed."])
+            self.assertEqual((edit.call_count, continuity.call_count, analysis.call_count), (0, 2, 1))
+            self.assertEqual(continuity.call_args_list[0].args[2], "Refreshed.")
+            self.assertTrue(pm.get_step_data("reviewed")["completed"])
+            self.assertNotIn("repair_progress", pm.get_step_data("reviewed"))
+            self.assertEqual(len(pm.get_step_data("reviewed")["repairs"]), 2)
+
     def test_project_save_failure_keeps_previous_checkpoint_and_raises(self):
         with tempfile.TemporaryDirectory() as directory:
             pm = ProjectManager(directory)

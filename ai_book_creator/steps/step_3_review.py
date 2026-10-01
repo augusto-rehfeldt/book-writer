@@ -69,56 +69,96 @@ class ReviewStep(BaseStep):
         chapters = self._read_chapters_content(written.get("chapters", {}))
         if not chapters:
             raise BrokenProjectStateError("No manuscript to review")
-        cached = dict(self.get_step_data().get("chapter_reviews", {}))
-        memory, ending = "", ""
-        ordered = list(chapters.items())
-        for index, (key, chapter) in enumerate(ordered):
-            context = story_context(init_data, memory)
-            context += f"\nPREVIOUS ENDING:\n{ending}"
-            # Later chapter edits are checked by the manuscript-wide pass. They
-            # must not invalidate completed local work whenever a run resumes.
-            context_hash = text_digest(context)
-            if index + 1 < len(ordered):
-                context += f"\nNEXT CHAPTER OPENING:\n{ordered[index + 1][1].content[:2500]}"
-            entry = cached.get(key, {})
-            if (entry.get("source_hash") != text_digest(chapter.content)
-                    or entry.get("context_hash") != context_hash):
+        state = self.get_step_data()
+        cached = dict(state.get("chapter_reviews", {}))
+        # Repairs and the continuity refresh after them are resumable. The saved
+        # digest proves the chapters on disk are the ones this progress produced.
+        repair = state.get("repair_progress") or {}
+        if repair.get("text_digest") != text_digest(self._combine_chapters_text(chapters)):
+            repair = {}
+        if repair:
+            memory, analysis = repair["memory"], repair["analysis"]
+        else:
+            memory, ending = "", ""
+            ordered = list(chapters.items())
+            cached_count = 0
+            for index, (key, chapter) in enumerate(ordered):
+                context = story_context(init_data, memory)
+                context += f"\nPREVIOUS ENDING:\n{ending}"
+                # Later chapter edits are checked by the manuscript-wide pass. They
+                # must not invalidate completed local work whenever a run resumes.
+                context_hash = text_digest(context)
+                if index + 1 < len(ordered):
+                    context += f"\nNEXT CHAPTER OPENING:\n{ordered[index + 1][1].content[:2500]}"
+                entry = cached.get(key, {})
+                needs_review = (entry.get("source_hash") != text_digest(chapter.content)
+                                or entry.get("context_hash") != context_hash)
+                if not needs_review:
+                    cached_count += 1
+                status = "reviewing" if needs_review else "cached"
+                if not needs_review and not entry.get("continuity"):
+                    status += "; continuity pending"
                 if is_auto():
-                    progress("Review", index + 1, len(ordered), chapter.title)
+                    progress("Review", index + 1, len(ordered),
+                             f"{cached_count} cached | {status}: {chapter.title}", complete=False)
                 else:
-                    print(f"Reviewing all of chapter {chapter.chapter_number}: {chapter.title}")
-                plot = self.project_manager.get_chapter_plot(chapter.chapter_number) or {}
-                instructions = (
-                    "Check scene causality, character knowledge, motivation, voice and transitions. "
-                    "Repair demonstrated contradictions using the established context. "
-                    "Do not add words just to meet the book's page target. "
-                    f"Planned chapter events (intentions, not authority over finished prose): {plot.get('plot_outline', '')}"
-                )
-                revised, findings = edit_text(self.ai_service, chapter.content, instructions, context)
-                self._save_chapter(key, chapter, revised, written)
-                entry = {"source_hash": text_digest(revised), "context_hash": context_hash,
-                         "findings": findings}
-                cached[key] = entry
-                self.save_step_data({**self.get_step_data(), "chapter_reviews": cached,
-                                     "completed": False, "_partial": True})
-                self.project_manager.save_project()
-            if not entry.get("continuity"):
-                entry["continuity"] = update_continuity(self.ai_service, chapter.content, memory, chapter.title)
-                self.project_manager.save_project()
-            written["chapters"][key]["context_hash"] = text_digest(memory)
-            memory, ending = entry["continuity"], chapter.content[-2500:]
-            written["chapters"][key].update(continuity=memory)
+                    print(f"Review chapter {chapter.chapter_number} ({status}): {chapter.title}")
+                if needs_review:
+                    plot = self.project_manager.get_chapter_plot(chapter.chapter_number) or {}
+                    instructions = (
+                        "Check scene causality, character knowledge, motivation, voice and transitions. "
+                        "Repair demonstrated contradictions using the established context. "
+                        "Do not add words just to meet the book's page target. "
+                        f"Planned chapter events (intentions, not authority over finished prose): {plot.get('plot_outline', '')}"
+                    )
+                    revised, findings = edit_text(self.ai_service, chapter.content, instructions, context)
+                    self._save_chapter(key, chapter, revised, written)
+                    entry = {"source_hash": text_digest(revised), "context_hash": context_hash,
+                             "findings": findings}
+                    cached[key] = entry
+                    self.save_step_data({**self.get_step_data(), "chapter_reviews": cached,
+                                         "completed": False, "_partial": True})
+                    self.project_manager.save_project()
+                if not entry.get("continuity"):
+                    entry["continuity"] = update_continuity(
+                        self.ai_service, chapter.content, memory, chapter.title,
+                        ("Review", index + 1, len(ordered), f"{cached_count} cached"))
+                    self.project_manager.save_project()
+                written["chapters"][key]["context_hash"] = text_digest(memory)
+                memory, ending = entry["continuity"], chapter.content[-2500:]
+                written["chapters"][key].update(continuity=memory)
 
-        full_text = self._combine_chapters_text(chapters)
-        analysis = self._generate_analysis(init_data, full_text)
+            if is_auto():
+                print()
+            analysis = self._generate_analysis(init_data, self._combine_chapters_text(chapters))
+            digest = text_digest(self._combine_chapters_text(chapters))
+            repair = {"base_digest": digest, "text_digest": digest, "memory": memory,
+                      "analysis": analysis, "done": []}
+            self.save_step_data({**self.get_step_data(), "repair_progress": repair})
+            self.project_manager.save_project()
         repair_log = list(self.get_step_data().get("repairs", []))
         # One bounded correction pass. Rejected or unresolved findings remain visible.
+        targets = []
         for key, chapter in chapters.items():
             issues = [issue for issue in analysis["issues"]
                       if issue.get("chapter_number") == chapter.chapter_number
                       and isinstance(issue.get("quote"), str) and issue["quote"].strip()
                       and chapter.content.count(issue["quote"]) == 1]
-            if not issues:
+            if issues or key in repair["done"]:
+                targets.append((key, chapter, issues))
+        cached_count = 0
+        for index, (key, chapter, issues) in enumerate(targets, 1):
+            if key in repair["done"]:
+                cached_count += 1
+                status = "cached"
+            else:
+                status = f"repairing {len(issues)} finding(s)"
+            if is_auto():
+                progress("Repair", index - (key not in repair["done"]), len(targets),
+                         f"{cached_count} cached | {status}: chapter {chapter.chapter_number}", complete=False)
+            else:
+                print(f"Repair chapter {chapter.chapter_number} ({status})", flush=True)
+            if key in repair["done"]:
                 continue
             original = chapter.content
             def diagnose(passage, issues=issues):
@@ -134,20 +174,36 @@ class ReviewStep(BaseStep):
             if revised != original:
                 cached[key]["source_hash"] = text_digest(revised)
                 cached[key].pop("continuity", None)
-            self.save_step_data({**self.get_step_data(), "chapter_reviews": cached, "repairs": repair_log})
+            repair["done"].append(key)
+            repair["text_digest"] = text_digest(self._combine_chapters_text(chapters))
+            self.save_step_data({**self.get_step_data(), "chapter_reviews": cached,
+                                 "repairs": repair_log, "repair_progress": repair})
             self.project_manager.save_project()
+        if is_auto() and targets:
+            progress("Repair", len(targets), len(targets), f"{cached_count} cached")
 
-        if self._combine_chapters_text(chapters) != full_text:
+        if repair["text_digest"] != repair["base_digest"]:
             # Refresh continuity from final text, including downstream chapters.
-            memory, ending = "", ""
-            for key, chapter in chapters.items():
+            refresh = repair.get("refresh", {"index": 0, "memory": "", "ending": ""})
+            memory, ending = refresh["memory"], refresh["ending"]
+            for index, (key, chapter) in enumerate(chapters.items(), 1):
+                if index <= refresh["index"]:
+                    continue
                 written["chapters"][key]["context_hash"] = text_digest(memory)
                 cached[key]["context_hash"] = text_digest(
                     story_context(init_data, memory) + f"\nPREVIOUS ENDING:\n{ending}")
-                memory = update_continuity(self.ai_service, chapter.content, memory, chapter.title)
+                memory = update_continuity(
+                    self.ai_service, chapter.content, memory, chapter.title,
+                    ("Refresh continuity", index, len(chapters)))
                 written["chapters"][key]["continuity"] = memory
                 cached[key]["continuity"] = memory
                 ending = chapter.content[-2500:]
+                repair["refresh"] = {"index": index, "memory": memory, "ending": ending}
+                self.save_step_data({**self.get_step_data(), "chapter_reviews": cached,
+                                     "repair_progress": repair})
+                self.project_manager.save_project()
+            if is_auto():
+                print()
             analysis = self._generate_analysis(init_data, self._combine_chapters_text(chapters))
 
         for key, chapter in chapters.items():
@@ -187,6 +243,10 @@ class ReviewStep(BaseStep):
         for index, passage in enumerate(passages, 1):
             if index <= cached.get("passage", 0):
                 continue
+            if is_auto():
+                progress("Manuscript analysis", index - 1, len(passages), f"passage {index}", complete=False)
+            else:
+                print(f"Manuscript analysis passage {index}/{len(passages)}")
             prompt = (
                 "Review this consecutive manuscript passage in the context of the earlier record. "
                 "Track setup/payoff, chronology, motivation, character knowledge, repeated scenes, "
@@ -220,6 +280,8 @@ class ReviewStep(BaseStep):
                 "source_hash": digest, "passage": index, "memo": memo, "issues": issues})
             self.save_step_data(state)
             self.project_manager.save_project()
+        if is_auto() and passages:
+            progress("Manuscript analysis", len(passages), len(passages))
         return {"analysis": memo, "issues": issues}
 
     def _humanness_spread(self, chapters):
