@@ -22,6 +22,7 @@ from ai_suite.providers import (  # noqa: F401
     _save_last_provider,
     choose_ai,
     provider_config_path,
+    provider_options,
 )
 
 from .core.book_creator import AIBookCreator
@@ -130,10 +131,20 @@ def _stash_previous_ebook_files() -> list[Path]:
     stash_dir.mkdir(parents=True, exist_ok=True)
 
     moved: list[Path] = []
+    new_paths: dict[str, str] = {}
     for path in files:
         target = _unique_target_path(stash_dir, path.name)
         shutil.move(str(path), str(target))
         moved.append(target)
+        new_paths[str(path.resolve())] = str(target.resolve())
+    # A package names its EPUB and cover by path; keep it publishable from the archive.
+    for target in moved:
+        if target.name.endswith("_kdp.json"):
+            package = json.loads(target.read_text(encoding="utf-8"))
+            for key in ("manuscript_file", "cover_file"):
+                if package.get(key):
+                    package[key] = new_paths.get(str(Path(package[key]).resolve()), package[key])
+            target.write_text(json.dumps(package, indent=2, ensure_ascii=False), encoding="utf-8")
     return moved
 
 
@@ -249,11 +260,21 @@ def run(
 
 
 def _publish(creator, target: str, kdp_visible: bool = False) -> str:
-    """KDP first when asked; GitHub release when KDP fails or is not wanted."""
-    package = creator.project_manager.get_step_data("publishing").get("package_file", "")
-    if not package:
+    """Publish every package of the project (a series leaves one per book), oldest first."""
+    last = creator.project_manager.get_step_data("publishing").get("package_file", "")
+    if not last:
         print("Publishing skipped: no package was prepared.")
         return ""
+    # Both publishers skip a package they already published, so earlier books are safe to revisit.
+    siblings = sorted(Path(last).parent.glob("*_kdp.json"), key=os.path.getmtime) if Path(last).is_file() else []
+    result = ""
+    for package in [str(path) for path in siblings if path != Path(last)] + [last]:
+        result = _publish_package(creator, package, target, kdp_visible)
+    return result
+
+
+def _publish_package(creator, package: str, target: str, kdp_visible: bool = False) -> str:
+    """KDP first when asked; GitHub release when KDP fails or is not wanted."""
     if target == "kdp":
         from .utils.kdp_publisher import publish_package
 
@@ -359,8 +380,8 @@ def main() -> None:
         args = _parse_args()
         if args.continuous and args.mode != "auto":
             raise ValueError("--continuous requires --mode auto")
-        if args.kdp_visible and not args.publish_kdp:
-            raise ValueError("--kdp-visible requires --publish-kdp")
+        if args.kdp_visible and not (args.publish_kdp or args.publish == "kdp"):
+            raise ValueError("--kdp-visible requires --publish or --publish-kdp")
         os.environ["AI_BOOK_MODE"] = args.mode
         if args.idea:
             os.environ["AI_BOOK_IDEA"] = args.idea

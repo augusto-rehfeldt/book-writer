@@ -11,7 +11,11 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from selenium import webdriver
-from selenium.common.exceptions import ElementClickInterceptedException, TimeoutException
+from selenium.common.exceptions import (
+    ElementClickInterceptedException,
+    StaleElementReferenceException,
+    TimeoutException,
+)
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 
@@ -75,7 +79,8 @@ def _driver(headless: bool) -> webdriver.Chrome:
     except Exception as exc:
         raise KdpPublishError(
             f"Could not open the KDP Chrome profile at {profile}. "
-            "Close any Chrome window using that profile and retry."
+            "Close any Chrome window using that profile and retry. "
+            f"({type(exc).__name__}: {str(exc).strip().splitlines()[0] if str(exc).strip() else ''})"
         ) from exc
 
 
@@ -393,9 +398,15 @@ def _categories(
 
 def _errors(driver) -> str:
     messages = []
-    for element in driver.find_elements(By.CSS_SELECTOR, ".a-alert-error, [role='alert']"):
-        if element.is_displayed() and element.text.strip():
-            messages.append(element.text.strip())
+    # #creation_limit_breached: the weekly title-limit dialog, which blocks saving a new title.
+    for element in driver.find_elements(
+        By.CSS_SELECTOR, ".a-alert-error, [role='alert'], #creation_limit_breached"
+    ):
+        try:
+            if element.is_displayed() and element.text.strip():
+                messages.append(element.text.strip())
+        except StaleElementReferenceException:
+            continue  # The page is navigating away; that alert is gone.
     return " | ".join(dict.fromkeys(messages))
 
 
@@ -763,7 +774,7 @@ def _login(driver, headless: bool, timeout: int, url: str | None = None) -> None
     if urlparse(driver.current_url).hostname != "kdp.amazon.com":
         if headless:
             raise KdpPublishError(
-                "The KDP profile is not signed in. Run once with --publish-kdp --kdp-visible, sign in, and retry."
+                "The KDP profile is not signed in. Run once with --publish --kdp-visible, sign in, and retry."
             )
         print("Sign in to KDP in the opened Chrome window; publishing will continue automatically.")
         WebDriverWait(driver, int(os.getenv("AI_BOOK_BROWSER_LOGIN_TIMEOUT", "300"))).until(
@@ -866,3 +877,22 @@ def publish_package(
     finally:
         if driver:
             driver.quit()
+
+
+if __name__ == "__main__":
+    # Manual upload of prepared packages: python -m ai_book_creator.utils.kdp_publisher [--visible] PACKAGE...
+    import sys
+
+    from .. import cli
+
+    # The last provider picks categories from KDP's live list, as a normal run does.
+    cli.choose_ai(None, "auto")
+    service = cli.AIBookCreator().ai_service
+    failed = []
+    for path in [arg for arg in sys.argv[1:] if arg != "--visible"]:
+        try:
+            publish_package(path, headless="--visible" not in sys.argv, ai_service=service)
+        except Exception as exc:
+            # One refused title must not strand the rest; its draft stays saved on KDP.
+            failed.append(f"{Path(path).name}: {str(exc).strip().splitlines()[0]}")
+    sys.exit("\n".join(failed))

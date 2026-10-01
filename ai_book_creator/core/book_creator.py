@@ -194,9 +194,13 @@ class AIBookCreator:
                 print("📁 Progress saved. You can resume later by running the script again.")
                 break
             except Exception as e:
-                print(f"\n❌ An unexpected error occurred: {e}")
                 import traceback
-                traceback.print_exc()
+                # Raised out of AIService's retry loop: the provider failed, not our code.
+                if any(f.name == "_generate_content_once" for f in traceback.extract_tb(e.__traceback__)):
+                    print(f"\n❌ The AI provider failed after all retries: {e}")
+                else:
+                    print(f"\n❌ An unexpected error occurred: {e}")
+                    traceback.print_exc()
                 self.project_manager.save_project()
                 print("📁 Progress saved despite error. You can try to resume later.")
                 break
@@ -205,30 +209,27 @@ class AIBookCreator:
 
     def _extract_titles_from_layout(self, layout: str) -> list[str]:
         """Extract up to three potential book titles from the layout text."""
-        titles = []
-        # Look for numbered list like "1. Title"
-        matches = re.findall(r'(?m)^\s*\d+\.\s*(.+?)(?:\n|$)', layout)
-        titles.extend(matches[:3])
-        if len(titles) < 3:
-            # Look for "Title: ..." pattern
-            matches2 = re.findall(r'(?i)title[:\s]+(.+?)(?:\n|$)', layout)
-            titles.extend(matches2[:3 - len(titles)])
-        if not titles:
-            # Fallback: any line that looks like a title
-            for line in layout.splitlines():
-                line = line.strip()
-                if line and len(line) < 80 and line[0].isupper() and not line.startswith(('•', '-', '*', '#')):
-                    titles.append(line)
-                    if len(titles) >= 3:
-                        break
-        # Clean and deduplicate
+        # The "TITLE: ..." line the prompt asks for, then "Title 1: ..." and "1. ..." lists.
+        titles = re.findall(r'(?im)^[\s*_#>-]*title(?:\s*\d+)?[\s*_]*:(.+)$', layout)
+        titles += re.findall(r'(?m)^\s*\d+\.\s*(.+?)\s*$', layout)[:3]
         cleaned = []
         for t in titles:
-            t = re.sub(r"[*_`#]", "", t).strip().strip('"')
-            t = re.sub(r"(?i)^title\s*:\s*", "", t).strip()
-            if t and t not in cleaned:
+            t = re.sub(r"[*_`#]", "", t).strip().strip('"“”').strip()
+            # A sentence or a "Book 5 ..." line is layout prose, never a title.
+            if (2 < len(t) <= 80 and not t.endswith((".", ":")) and not re.match(r"(?i)book\s+\d", t)
+                    and t not in cleaned):
                 cleaned.append(t)
-        return cleaned
+        return cleaned[:3]
+
+    def _ask_title(self, layout: str, used_titles: list[str]) -> str:
+        """One short call for a title when the layout carries none we can read."""
+        raw = self.ai_service.generate_content(
+            "Reply with one evocative book title for this layout and nothing else. "
+            f"Do not reuse: {', '.join(used_titles) or 'none'}.\n\n{layout[:3000]}",
+            max_completion_tokens=40,
+        )
+        title = next(iter(self._extract_titles_from_layout(f"TITLE: {raw.strip().splitlines()[0]}")), "") if raw.strip() else ""
+        return "" if title in used_titles else title
 
     def _advance_to_next_book(self, current_book: int):
         """Archives the finished book's files and prompts the AI for the next book layout."""
@@ -297,6 +298,7 @@ class AIBookCreator:
                     ("Previous Books Context", previous_summaries if previous_summaries else "Follow the series layout progression."),
                     (
                         "Required output",
+                        f'First line exactly "TITLE: <the best title for Book {current_book + 1}>". Then: '
                         f"3 potential titles for Book {current_book + 1}; genre; target audience; 3-5 main themes for this book; setting overview; "
                         f"three-act structure for Book {current_book + 1}; 5-7 main characters with name, role, and brief description."
                     )
@@ -369,6 +371,8 @@ class AIBookCreator:
         chosen_title = next((title for title in candidate_titles if title not in used_titles), None)
         if not chosen_title and candidate_titles:
             chosen_title = f"{candidate_titles[0]} (Book {current_book + 1})"
+        if not chosen_title:
+            chosen_title = self._ask_title(new_layout, used_titles)
         if chosen_title:
             used_titles.append(chosen_title)
             init_data["book_titles"] = used_titles

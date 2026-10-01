@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from ai_book_creator import cli
+from ai_book_creator.core.book_creator import AIBookCreator
 from ai_book_creator.core.project_manager import ProjectManager
 from ai_book_creator.steps.step_0_init import InitStep
 from ai_book_creator.utils import github_publisher
@@ -135,6 +136,39 @@ class PublishTests(unittest.TestCase):
                 patch.object(github_publisher, "publish_package", return_value="https://gh/rel") as gh:
             self.assertEqual(cli._publish(creator, "kdp"), "github")
             gh.assert_called_once_with("x_kdp.json")
+
+    def test_series_publishes_every_package(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first, last = Path(directory) / "one_kdp.json", Path(directory) / "two_kdp.json"
+            for index, package in enumerate((first, last)):
+                package.write_text("{}", encoding="utf-8")
+                os.utime(package, (index, index))
+            creator = SimpleNamespace(
+                ai_service=None,
+                project_manager=SimpleNamespace(get_step_data=lambda _: {"package_file": str(last)}))
+            with patch.object(github_publisher, "publish_package", return_value="https://gh/rel") as gh:
+                cli._publish(creator, "github")
+            self.assertEqual([call.args[0] for call in gh.call_args_list], [str(first), str(last)])
+
+    def test_archived_package_follows_its_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory)
+            epub = output / "ebook" / "book.epub"
+            epub.parent.mkdir()
+            epub.write_text("x", encoding="utf-8")
+            (output / "ebook" / "book_kdp.json").write_text(
+                json.dumps({"manuscript_file": str(epub), "cover_file": ""}), encoding="utf-8")
+            with patch.object(cli, "PROJECT_OUTPUT_DIR", output), \
+                    patch.object(cli, "PROJECT_ARCHIVE_DIR", output / "archive" / "ebooks"):
+                moved = cli._stash_previous_ebook_files()
+            package = json.loads(next(p for p in moved if p.suffix == ".json").read_text(encoding="utf-8"))
+            self.assertTrue(Path(package["manuscript_file"]).is_file())
+
+    def test_series_title_is_never_layout_prose(self):
+        extract = AIBookCreator._extract_titles_from_layout
+        self.assertEqual(extract(None, "Book 5 is planned for 267 pages and closes the series.\n\nGenre: SF"), [])
+        self.assertEqual(extract(None, "**TITLE:** Ledger of Last Hands\n\n1. Ledger of Last Hands\n2. \"Held Stocks\""),
+                         ["Ledger of Last Hands", "Held Stocks"])
 
     def test_existing_release_is_not_posted_twice(self):
         with tempfile.TemporaryDirectory() as directory:
