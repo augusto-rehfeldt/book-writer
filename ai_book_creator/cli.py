@@ -198,6 +198,10 @@ def run(
     pause: int = 0,
     retry_wait: int = 900,
     publish: str = "",
+    model: str | None = None,
+    review_model: str | None = None,
+    effort: str | None = None,
+    review_effort: str | None = None,
 ) -> bool:
     # Two roles: the review stages (model_type="review") get their own model and effort.
     choose_ai(provider, "review" if ask_models else mode, roles=("writing", "review"))
@@ -234,7 +238,20 @@ def run(
     exit_on_ctrl_c(lambda: creator and creator.project_manager.save_project(),
                    "Process interrupted by user. Progress has been saved.")
     while True:
-        creator = AIBookCreator()
+        overrides = {key: value for key, value in (
+            ("AI_WRITING_MODEL", model), ("AI_REVIEW_MODEL", review_model),
+            ("AI_WRITING_EFFORT", effort), ("AI_REVIEW_EFFORT", review_effort),
+        ) if value is not None}
+        previous = {key: os.environ.get(key) for key in overrides}
+        try:
+            os.environ.update(overrides)
+            creator = AIBookCreator()
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
         completed = creator.create_book()
         if completed and publish:
             _publish(creator, publish, kdp_visible)
@@ -310,6 +327,10 @@ def _parse_args() -> argparse.Namespace:
                              "concept in any mode; later --forever projects are the AI's")
     parser.add_argument("--mode", choices=("review", "auto"), default=os.getenv("AI_BOOK_MODE", "review"))
     parser.add_argument("--provider", choices=tuple(PROVIDER_CONFIG_MAP))
+    parser.add_argument("--model", help="writing model; overrides the provider menu")
+    parser.add_argument("--review-model", help="review model; overrides the provider menu")
+    parser.add_argument("--effort", help="writing reasoning effort; overrides the provider menu")
+    parser.add_argument("--review-effort", help="review reasoning effort; overrides the provider menu")
     parser.add_argument("--author")
     parser.add_argument("--pages", type=_range_arg, metavar="MIN-MAX")
     parser.add_argument("--chapters", type=_range_arg, metavar="MIN-MAX")
@@ -419,6 +440,10 @@ def main() -> None:
             pause=args.pause,
             retry_wait=args.retry_wait,
             publish=args.publish or "",
+            model=args.model,
+            review_model=args.review_model,
+            effort=args.effort,
+            review_effort=args.review_effort,
         )
     except KeyboardInterrupt:
         print("\n\nProcess interrupted by user. Progress has been saved.")

@@ -203,6 +203,18 @@ Useful environment variables:
 
 ## Running the app
 
+```bash
+python main.py --mode auto --provider openai --model gpt-6.1-sol --review-model gpt-6.1-sol --effort medium --review-effort high
+```
+
+`--model` and `--review-model` override the writing and review roles selected by
+the provider menu; `--effort` and `--review-effort` override their reasoning efforts.
+Omitted flags retain the menu/provider defaults. These overrides are applied after
+the menu, are not saved as menu defaults, and use the shared AIService provider
+behavior (only providers/models supporting reasoning effort send it).
+`--resume` remains a boolean flag for the saved project; `--forever` retains its
+existing automatic new-project/retry loop. No worker flag is provided.
+
 Launch the main workflow from the repository root:
 
 ```bash

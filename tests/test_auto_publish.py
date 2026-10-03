@@ -16,6 +16,23 @@ from ai_book_creator.steps.step_0_init import InitStep
 from ai_book_creator.utils import github_publisher
 
 
+class ProcessWindowTests(unittest.TestCase):
+    def test_noninteractive_tools_hide_windows_with_portable_fallback(self):
+        import ast
+        root = Path(__file__).resolve().parents[1]
+        for filename in ('ai_book_creator/utils/github_publisher.py', 'benchmarks/build_prose_baseline.py'):
+            tree = ast.parse((root / filename).read_text(encoding='utf-8'))
+            calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)
+                     and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+                     and n.func.value.id == 'subprocess' and n.func.attr == 'run']
+            self.assertEqual(len(calls), 1)
+            flags = next((k.value for k in calls[0].keywords if k.arg == 'creationflags'), None)
+            self.assertIsNotNone(flags, filename)
+            code = compile(ast.Expression(flags), filename, 'eval')
+            self.assertEqual(eval(code, {'subprocess': SimpleNamespace(CREATE_NO_WINDOW=0x08000000)}), 0x08000000)
+            self.assertEqual(eval(code, {'subprocess': SimpleNamespace()}), 0)
+
+
 class FlagTests(unittest.TestCase):
     def parse(self, *argv):
         with patch.object(sys, "argv", ["main.py", *argv]):
@@ -25,6 +42,39 @@ class FlagTests(unittest.TestCase):
         args = self.parse("--forever")
         self.assertTrue(args.auto)
         self.assertEqual(args.mode, "auto")
+
+    def test_role_override_flags_preserve_resume_and_forever(self):
+        args = self.parse("--model", "work", "--review-model", "review", "--effort", "low",
+                          "--review-effort", "high", "--resume", "--forever")
+        self.assertEqual((args.model, args.review_model, args.effort, args.review_effort),
+                         ("work", "review", "low", "high"))
+        self.assertIs(args.resume, True)
+        self.assertTrue(args.forever)
+
+    def test_role_overrides_win_after_menu_and_reach_service(self):
+        from ai_suite import AIService
+        keys = ("AI_WRITING_MODEL", "AI_REVIEW_MODEL", "AI_WRITING_EFFORT", "AI_REVIEW_EFFORT")
+        picked = dict(zip(keys, ("menu-work", "menu-review", "medium", "max")))
+        seen = []
+
+        def create():
+            service = AIService(config_overrides={"provider": "openai", "api_key": "offline"})
+            seen.append((service.writing_model, service.review_model,
+                         service.reasoning_effort, service.review_reasoning_effort))
+            return SimpleNamespace(create_book=lambda: True,
+                                   project_manager=SimpleNamespace(save_project=lambda: None))
+
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {}, clear=True), \
+                patch.object(cli, "PROJECT_STATE_FILE", Path(directory) / "none.json"), \
+                patch.object(cli, "choose_ai", side_effect=lambda *a, **k: os.environ.update(picked)), \
+                patch.object(cli, "AIBookCreator", side_effect=create), \
+                patch.object(cli, "_has_previous_generated_artifacts", return_value=False), \
+                patch.object(cli, "exit_on_ctrl_c"):
+            cli.run("openai", "auto", model="cli-work", review_effort="high")
+            self.assertEqual(seen, [("cli-work", "menu-review", "medium", "high")])
+            self.assertEqual({key: os.environ.get(key) for key in keys}, picked)
+            cli.run("openai", "auto")
+            self.assertEqual(seen[-1], ("menu-work", "menu-review", "medium", "max"))
 
     def test_publish_flags(self):
         self.assertEqual(self.parse("--publish").publish, "kdp")
